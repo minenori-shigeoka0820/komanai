@@ -1,3 +1,5 @@
+// app/api/search/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { normalizeName, variants } from "../../../lib/normalize";
 
 type Cand = {
@@ -8,13 +10,25 @@ type Cand = {
   address?: string;
 };
 
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE!;
+
+async function sbSelect(path: string) {
+  const url = `${SUPABASE_URL}/rest/v1/${path}`;
+  const r = await fetch(url, {
+    headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` },
+    cache: "no-store" as any,
+  });
+  return r.ok ? r.json() : [];
+}
+
 async function nominatimCenter(q: string) {
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
+    q
+  )}&countrycodes=jp&limit=1&accept-language=ja&addressdetails=1`;
   try {
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
-      q
-    )}&countrycodes=jp&limit=1&accept-language=ja&addressdetails=1`;
     const r = await fetch(url, {
-      headers: { "User-Agent": "komanai.com demo" } as any,
+      headers: { "User-Agent": "komanai.com search" } as any,
       cache: "no-store" as any,
     });
     const js = await r.json();
@@ -35,158 +49,54 @@ function dedupByCoord(items: Cand[], digits = 6) {
   });
 }
 
-// 実道路のhighwayのみを許可（バス停・歩道等を除外）
-const HWY_ROAD_REGEX = "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
-// バス関連の除外条件
-const NOT_BUS = `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]`;
+const HWY_ROAD_REGEX =
+  "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
+const NOT_BUS =
+  `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]["public_transport"!="stop_area"]`;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const raw = (searchParams.get("q") || "").trim();
   if (!raw) return NextResponse.json({ items: [] });
 
-  // 正規化：空白除去＆「交差点」付きを両方見る
-  const norm = raw.replace(/\s+/g, "");
-  const variants = Array.from(new Set([norm, norm.endsWith("交差点") ? norm : norm + "交差点"]));
+  // cityヒント（「…市/区/町/村」で終わる最長一致をざっくり拾う）
+  const m = raw.match(/(.+[市区町村])/);
+  const cityHint = m ? m[1] : "";
 
-  const hasCityToken = /[市区町村]/.test(raw);
-  const center = hasCityToken ? await nominatimCenter(raw) : null;
+  // まずは Supabase キャッシュから
+  const norm = normalizeName(raw);
+  const vlist = variants(raw).map((v) => v.toLowerCase());
+  const whereCity = cityHint ? `&city=eq.${encodeURIComponent(cityHint)}` : "";
 
-  const nodeAround = center ? (r: number) => `node(around:${r}, ${center.lat}, ${center.lng})` : (_: number) => `node`;
-  const wayAround  = center ? (r: number) => `way(around:${r}, ${center.lat}, ${center.lng})`  : (_: number) => `way`;
-
-  // 1) 完全一致（バス停等を除外、実道路＆交差・信号に絞る）
-  const regAlternation = variants.map(v => `^${v}$`).join("|");
-  const overpassExact = `
-    [out:json][timeout:25];
-    (
-      ${nodeAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${regAlternation}",i]${NOT_BUS};
-      ${nodeAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${regAlternation}",i]${NOT_BUS};
-      ${nodeAround(1500)}["highway"~"traffic_signals|stop|crossing"]["name"~"${regAlternation}",i]${NOT_BUS};
-      ${nodeAround(1500)}["junction"]["name"~"${regAlternation}",i]${NOT_BUS};
-
-      ${wayAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${regAlternation}",i]${NOT_BUS};
-      ${wayAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${regAlternation}",i]${NOT_BUS};
-      ${wayAround(1500)}["junction"]["name"~"${regAlternation}",i]${NOT_BUS};
-    );
-    out tags center 150;
-  `;
-  try {
-    const oRes = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: overpassExact,
-      cache: "no-store" as any,
+  // 完全一致（variants）
+  const exact = await sbSelect(
+    `intersections?select=name,lat,lng,city&name_norm=in.(${vlist.map(encodeURIComponent).join(",")})${whereCity}`
+  );
+  if (Array.isArray(exact) && exact.length) {
+    return NextResponse.json({
+      items: exact.map((r: any) => ({ name: r.name, lat: r.lat, lng: r.lng, source: "exact" as const })),
     });
-    const oJs = await oRes.json();
-    let exact: Cand[] =
-      (oJs?.elements ?? [])
-        .map((e: any) => {
-          const y = e.lat ?? e.center?.lat;
-          const x = e.lon ?? e.center?.lon;
-          const name = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
-          if (!y || !x || !name) return null;
-          const n = name.replace(/\s+/g, "");
-          if (!variants.some(v => n.toLowerCase() === v.toLowerCase())) return null;
-          return { name, lat: y, lng: x, source: "exact" as const };
-        })
-        .filter(Boolean) as Cand[];
-    if (exact.length) {
-      exact = dedupByCoord(exact);
-      if (center) {
-        exact.sort(
-          (a, b) =>
-            Math.hypot(a.lat - center.lat, a.lng - center.lng) -
-            Math.hypot(b.lat - center.lat, b.lng - center.lng)
-        );
-      }
-      return NextResponse.json({ items: exact });
-    }
-  } catch {}
-
-  // 2) 部分一致（こちらもバス停等を除外＋中心付近に限定）
-  if (center) {
-    const overpassPartial = `
-      [out:json][timeout:25];
-      (
-        ${nodeAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${norm}",i]${NOT_BUS};
-        ${nodeAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${norm}",i]${NOT_BUS};
-        ${nodeAround(3000)}["highway"~"traffic_signals|stop|crossing"]["name"~"${norm}",i]${NOT_BUS};
-        ${nodeAround(3000)}["junction"]["name"~"${norm}",i]${NOT_BUS};
-
-        ${wayAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${norm}",i]${NOT_BUS};
-        ${wayAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${norm}",i]${NOT_BUS};
-        ${wayAround(3000)}["junction"]["name"~"${norm}",i]${NOT_BUS};
-      );
-      out tags center 200;
-    `;
-    try {
-      const r = await fetch("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: overpassPartial,
-        cache: "no-store" as any,
-      });
-      const d = await r.json();
-      let partial: Cand[] =
-        (d?.elements ?? [])
-          .map((e: any) => {
-            const y = e.lat ?? e.center?.lat;
-            const x = e.lon ?? e.center?.lon;
-            const name = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
-            return y && x ? { name: name || "交差点（部分一致）", lat: y, lng: x, source: "partial" as const } : null;
-          })
-          .filter(Boolean) as Cand[];
-
-      if (partial.length) {
-        partial = dedupByCoord(partial);
-        partial.sort(
-          (a, b) =>
-            Math.hypot(a.lat - center.lat, a.lng - center.lng) -
-            Math.hypot(b.lat - center.lat, b.lng - center.lng)
-        );
-        return NextResponse.json({ items: partial.slice(0, 20) });
-      }
-    } catch {}
   }
 
-  // 3) 近傍候補（信号/交差ノードのみ）
-  const nearCenter = center ?? (await nominatimCenter(raw));
-  if (!nearCenter) return NextResponse.json({ items: [] });
-
-  const overpassNearby = `
-    [out:json][timeout:20];
-    (
-      node(around:400, ${nearCenter.lat}, ${nearCenter.lng})["highway"~"traffic_signals|stop|crossing"]${NOT_BUS};
-      node(around:400, ${nearCenter.lat}, ${nearCenter.lng})["junction"~"yes|intersection|roundabout"]${NOT_BUS};
-      way(around:400, ${nearCenter.lat}, ${nearCenter.lng})["junction"]["name"]${NOT_BUS};
-    );
-    out tags center 200;
-  `;
-  try {
-    const r = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: overpassNearby,
-      cache: "no-store" as any,
+  // 部分一致（name_norm ILIKE）
+  const partial = await sbSelect(
+    `intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(norm)}*${whereCity}`
+  );
+  if (Array.isArray(partial) && partial.length) {
+    return NextResponse.json({
+      items: (partial as any[])
+        .slice(0, 20)
+        .map((r) => ({ name: r.name, lat: r.lat, lng: r.lng, source: "partial" as const })),
     });
-    const d = await r.json();
-    let items: Cand[] =
-      (d?.elements ?? []).map((e: any) => {
-        const lat = e.lat ?? e.center?.lat;
-        const lng = e.lon ?? e.center?.lon;
-        const name = (e.tags?.["name:ja"] || e.tags?.name || "交差点候補").trim();
-        return { name, lat, lng, source: "nearby" as const };
-      }) || [];
-    items = dedupByCoord(items);
-    items.sort(
-      (a, b) =>
-        Math.hypot(a.lat - nearCenter.lat, a.lng - nearCenter.lng) -
-        Math.hypot(b.lat - nearCenter.lat, b.lng - nearCenter.lng)
-    );
-    return NextResponse.json({ items: items.slice(0, 20) });
-  } catch {
-    return NextResponse.json({ items: [] });
   }
+
+  // キャッシュ薄い → 非同期で市単位インデックス作成をキックしつつ、いまは空を返す
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "";
+  const cityToIndex = cityHint || raw; // とりあえず生入力でもOK
+  if (SERVICE_KEY) {
+    fetch(`${baseUrl}/api/index-area?city=${encodeURIComponent(cityToIndex)}`).catch(() => {});
+  }
+
+  // 最初は空、数秒後に再検索でヒット（キャッシュ作成後）
+  return NextResponse.json({ items: [] });
 }
-
