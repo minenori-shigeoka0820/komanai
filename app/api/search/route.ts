@@ -1,32 +1,64 @@
 import { NextRequest, NextResponse } from "next/server";
 
-type Cand = { name: string; lat: number; lng: number; source: "exact" | "nearby"; address?: string };
+type Cand = {
+  name: string;
+  lat: number;
+  lng: number;
+  source: "exact" | "nearby";
+  address?: string;
+};
+
+async function nominatimCenter(q: string) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
+      q
+    )}&countrycodes=jp&limit=1&accept-language=ja&addressdetails=1`;
+    const r = await fetch(url, {
+      headers: { "User-Agent": "komanai.com demo" } as any,
+      cache: "no-store" as any,
+    });
+    const js = await r.json();
+    if (Array.isArray(js) && js[0]?.lat && js[0]?.lon) {
+      return { lat: parseFloat(js[0].lat), lng: parseFloat(js[0].lon) };
+    }
+  } catch {}
+  return null;
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get("q") || "").trim();
   if (!q) return NextResponse.json({ items: [] });
 
-  // 例： "川岸三丁目 戸田市" → city 推定
-  const tokens = q.split(/\s+/);
-  const city = tokens.find(t => /市|区|町|村$/.test(t)) || "";
-  const term = q; // 完全一致優先。改良余地：市を除いた本体だけでも試す
+  // クエリから「市/区/町/村」を含むかで中心を推定
+  const hasCityToken = /[市区町村]($|\s)/.test(q);
+  const center = hasCityToken ? await nominatimCenter(q) : null;
 
-  // 1) Overpass完全一致（全国 or city内）
-  const areaClause = city
-    ? `area["name"="${city}"]["boundary"="administrative"];(.area;)->.a;`
-    : `node._dummy; ->.a;`; // ダミー（全国検索に切替）
-  const inArea = city ? `(area.a)` : ``;
+  // 1) 完全一致（name / name:ja）のみを探索（大文字小文字無視）
+  //    - 中心が取れていれば around:1500m に限定
+  //    - 取れない場合は全国だが、交通関連の要素に絞って最大100件
+  const term = q.replace(/\s+/g, ""); // 空白差を吸収
+  const eq = `^${term}$`;
+  const areaAround = center
+    ? `node(around:1500, ${center.lat}, ${center.lng})`
+    : "node";
+  const wayAround = center
+    ? `way(around:1500, ${center.lat}, ${center.lng})`
+    : "way";
 
   const overpassExact = `
-    [out:json][timeout:15];
-    ${areaClause}
+    [out:json][timeout:20];
     (
-      node${inArea}["highway"~"traffic_signals|stop|crossing"]["name"="${term}"];
-      node${inArea}["junction"]["name"="${term}"];
-      way${inArea}["junction"]["name"="${term}"];
+      ${areaAround}["highway"]["name"~"${eq}",i];
+      ${areaAround}["highway"]["name:ja"~"${eq}",i];
+      ${areaAround}["highway"~"traffic_signals|stop|crossing"]["name"~"${eq}",i];
+      ${areaAround}["junction"]["name"~"${eq}",i];
+
+      ${wayAround}["highway"]["name"~"${eq}",i];
+      ${wayAround}["highway"]["name:ja"~"${eq}",i];
+      ${wayAround}["junction"]["name"~"${eq}",i];
     );
-    out tags center 50;
+    out tags center 100;
   `;
 
   try {
@@ -36,50 +68,53 @@ export async function GET(req: NextRequest) {
       body: overpassExact,
       cache: "no-store" as any,
     });
-    const oData = await oRes.json();
-    const exactItems: Cand[] = (oData?.elements ?? [])
-      .map((e: any) => {
-        const lat = e.lat ?? e.center?.lat;
-        const lng = e.lon ?? e.center?.lon;
-        const name = e.tags?.["name:ja"] || e.tags?.name || "";
-        return lat && lng && name ? { name, lat, lng, source: "exact" as const } : null;
-      })
-      .filter(Boolean);
+    const oJs = await oRes.json();
+    let exact: Cand[] =
+      (oJs?.elements ?? [])
+        .map((e: any) => {
+          const y = e.lat ?? e.center?.lat;
+          const x = e.lon ?? e.center?.lon;
+          const raw = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
+          if (!y || !x || !raw) return null;
+          // スペース無視で完全一致確認
+          const norm = raw.replace(/\s+/g, "");
+          if (norm.toLowerCase() !== term.toLowerCase()) return null;
+          return { name: raw, lat: y, lng: x, source: "exact" as const };
+        })
+        .filter(Boolean) as Cand[];
 
-    if (exactItems.length) {
-      // 重複を多少まとめる
+    // 重複除去＆近い順
+    if (exact.length) {
       const seen = new Set<string>();
-      const uniq = exactItems.filter((it) => {
+      exact = exact.filter((it) => {
         const key = `${it.name}|${it.lat.toFixed(6)}|${it.lng.toFixed(6)}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
-      return NextResponse.json({ items: uniq });
+      if (center) {
+        exact.sort(
+          (a, b) =>
+            Math.hypot(a.lat - center.lat, a.lng - center.lng) -
+            Math.hypot(b.lat - center.lat, b.lng - center.lng)
+        );
+      }
+      return NextResponse.json({ items: exact });
     }
-  } catch { /* ignore */ }
+  } catch {}
 
-  // 2) 一致なし → Nominatimで中心点 → その周辺交差点を複数
-  let center: { lat: number; lng: number } | null = null;
-  try {
-    const nUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&countrycodes=jp&limit=1&accept-language=ja&addressdetails=1`;
-    const nRes = await fetch(nUrl, { headers: { "User-Agent": "komanai.com demo" } as any });
-    const n = await nRes.json();
-    if (Array.isArray(n) && n[0]?.lat && n[0]?.lon) {
-      center = { lat: parseFloat(n[0].lat), lng: parseFloat(n[0].lon) };
-    }
-  } catch { /* ignore */ }
+  // 2) 完全一致なし → 近傍候補（中心がなければまず中心を取る）
+  const nearCenter = center ?? (await nominatimCenter(q));
+  if (!nearCenter) return NextResponse.json({ items: [] });
 
-  if (!center) return NextResponse.json({ items: [] });
-
-  // 近傍の交差点ノード列挙（半径200m）
   const overpassNearby = `
-    [out:json][timeout:15];
+    [out:json][timeout:20];
     (
-      node(around:200, ${center.lat}, ${center.lng})["highway"~"traffic_signals|stop|crossing"];
-      node(around:200, ${center.lat}, ${center.lng})["junction"~"yes|intersection|roundabout"];
+      node(around:300, ${nearCenter.lat}, ${nearCenter.lng})["highway"~"traffic_signals|stop|crossing"];
+      node(around:300, ${nearCenter.lat}, ${nearCenter.lng})["junction"~"yes|intersection|roundabout"];
+      way(around:300, ${nearCenter.lat}, ${nearCenter.lng})["junction"]["name"];
     );
-    out tags center 80;
+    out tags center 120;
   `;
   try {
     const r = await fetch("https://overpass-api.de/api/interpreter", {
@@ -89,27 +124,28 @@ export async function GET(req: NextRequest) {
       cache: "no-store" as any,
     });
     const d = await r.json();
-    const items: Cand[] = (d?.elements ?? []).map((e: any) => {
-      const lat = e.lat ?? e.center?.lat;
-      const lng = e.lon ?? e.center?.lon;
-      const name = e.tags?.["name:ja"] || e.tags?.name || ""; // ないことも多い
-      return { name: name || "交差点候補", lat, lng, source: "nearby" as const };
-    });
-
-    // 近い順に上位表示
-    items.sort((a, b) =>
-      Math.hypot(a.lat - center!.lat, a.lng - center!.lng) - Math.hypot(b.lat - center!.lat, b.lng - center!.lng)
+    let items: Cand[] =
+      (d?.elements ?? []).map((e: any) => {
+        const lat = e.lat ?? e.center?.lat;
+        const lng = e.lon ?? e.center?.lon;
+        const name = (e.tags?.["name:ja"] || e.tags?.name || "交差点候補").trim();
+        return { name, lat, lng, source: "nearby" as const };
+      }) || [];
+    // 近い順＋重複除去
+    items.sort(
+      (a, b) =>
+        Math.hypot(a.lat - nearCenter.lat, a.lng - nearCenter.lng) -
+        Math.hypot(b.lat - nearCenter.lat, b.lng - nearCenter.lng)
     );
-    // 重複除去
     const seen = new Set<string>();
-    const uniq = items.filter((it) => {
+    items = items.filter((it) => {
       const key = `${it.lat.toFixed(6)}|${it.lng.toFixed(6)}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     }).slice(0, 12);
 
-    return NextResponse.json({ items: uniq });
+    return NextResponse.json({ items });
   } catch {
     return NextResponse.json({ items: [] });
   }
