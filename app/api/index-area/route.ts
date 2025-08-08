@@ -1,4 +1,3 @@
-import { NextRequest, NextResponse } from "next/server";
 import { normalizeName, variants } from "../../../lib/normalize";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
