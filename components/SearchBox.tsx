@@ -27,39 +27,38 @@ export default function SearchBox() {
   }, []);
 
   const search = async (query: string) => {
-    const trimmed = query.trim();
-    if (!trimmed) {
+    const s = query.trim();
+    if (!s) {
       setItems([]);
       return;
     }
-    const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`);
-    const json = await res.json();
-    setItems(json.items || []);
+    const res = await fetch(`/api/search?q=${encodeURIComponent(s)}`, { cache: "no-store" });
+    const js = await res.json();
+    const arr: Cand[] = js.items || [];
+    setItems(arr);
     setOpen(true);
 
-    // もし nearby のみ多数返ってきた場合、地図上にも「候補群を描画」させる
-    if (Array.isArray(json.items) && json.items.length > 0 && json.items.every((i: Cand) => i.source === "nearby")) {
-      window.dispatchEvent(
-        new CustomEvent("komanai:candidates", { detail: { items: json.items } })
-      );
+    // 近傍候補のみの場合は地図にも候補群を描画させる
+    if (arr.length > 0 && arr.every((i) => i.source === "nearby")) {
+      window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: arr } }));
+    } else {
+      // 完全一致や単一選択時は候補レイヤーを消す用の空通知でもOK
+      window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
     }
   };
 
-  const debounced = useRef(debounce(search, 300)).current;
+  const debounced = useRef(debounce(search, 250)).current;
 
   const select = (c: Cand) => {
     setQ(c.name);
     setOpen(false);
-    // 地図へ：選択地点へフライ＆マーカー
-    window.dispatchEvent(
-      new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17 } })
-    );
+    window.dispatchEvent(new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17 } }));
   };
 
   const hasExact = items.some((i) => i.source === "exact");
 
   return (
-    <div ref={boxRef} style={{ position: "relative", maxWidth: 600 }}>
+    <div ref={boxRef} style={{ position: "relative", maxWidth: 620, zIndex: 10001 }}>
       <input
         value={q}
         onChange={(e) => {
@@ -68,22 +67,26 @@ export default function SearchBox() {
           debounced(v);
         }}
         onFocus={() => q && items.length && setOpen(true)}
-        placeholder="例）川岸三丁目 戸田市（完全一致優先／AND）"
-        style={{
-          width: "100%", padding: "10px 12px",
-          border: "1px solid #ccc", borderRadius: 8,
-        }}
+        placeholder="例）川岸三丁目 戸田市（完全一致優先／一致なしは候補表示）"
+        style={{ width: "100%", padding: "10px 12px", border: "1px solid #ccc", borderRadius: 8, background: "#fff" }}
       />
       {open && items.length > 0 && (
         <div
           style={{
-            position: "absolute", zIndex: 20, top: "110%", left: 0, right: 0,
-            background: "#fff", border: "1px solid #ddd", borderRadius: 8, boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
-            overflow: "hidden"
+            position: "absolute",
+            zIndex: 10000,           // ← 地図より前面に
+            top: "110%",
+            left: 0,
+            right: 0,
+            background: "#fff",
+            border: "1px solid #ddd",
+            borderRadius: 8,
+            boxShadow: "0 8px 22px rgba(0,0,0,0.12)",
+            overflow: "hidden",
           }}
         >
           {hasExact && (
-            <div style={{ padding: "6px 10px", fontSize: 12, color: "#0a7" }}>完全一致</div>
+            <div style={{ padding: "6px 10px", fontSize: 12, color: "#0a7", background: "#f6fffa" }}>完全一致</div>
           )}
           {items.map((c, idx) => (
             <button
@@ -91,16 +94,17 @@ export default function SearchBox() {
               type="button"
               onClick={() => select(c)}
               style={{
-                display: "block", width: "100%", textAlign: "left",
-                padding: "10px 12px", border: "none",
-                background: c.source === "exact" ? "#f8fffb" : "white",
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                padding: "10px 12px",
+                border: "none",
+                background: c.source === "exact" ? "#f8fffb" : "#fff",
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontWeight: 600 }}>
-                {c.name}{c.source === "nearby" ? "（候補）" : ""}
-              </div>
-              {c.address && <div style={{ fontSize: 12, color: "#555" }}>{c.address}</div>}
+              <div style={{ fontWeight: 600 }}>{c.name || "交差点候補"}</div>
+              {c.source === "nearby" && <div style={{ fontSize: 12, color: "#666" }}>（近辺の候補）</div>}
             </button>
           ))}
           {!hasExact && (
