@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import dynamic from "next/dynamic";
+import SearchBox from "../components/SearchBox";
 
 const HomeMap = dynamic(() => import("../components/HomeMap"), { ssr: false });
 
@@ -10,16 +11,19 @@ export default function Page() {
   const [coords, setCoords] = useState<{ lat?: number; lng?: number }>({});
 
   return (
-    <main style={{ padding: 16 }}>
+    <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
       <h1>こまない.com（雛形）</h1>
-      <p>地図をクリックすると、交差点名候補が自動入力されます。</p>
+      <p>地図をクリック or キーワード検索（AND）で交差点を選べます。</p>
 
-      <HomeMap
-        onSelect={({ name, lat, lng }) => {
-          setLocName(name || "");
-          setCoords({ lat, lng });
-        }}
-      />
+      <div style={{ display: "grid", gap: 12 }}>
+        <SearchBox />
+        <HomeMap
+          onSelect={({ name, lat, lng }) => {
+            if (name) setLocName(name);
+            setCoords({ lat, lng });
+          }}
+        />
+      </div>
 
       {coords.lat && coords.lng && (
         <p style={{ marginTop: 8 }}>
@@ -37,7 +41,7 @@ export default function Page() {
               value={locName}
               onChange={(e) => setLocName(e.target.value)}
               required
-              placeholder="地図をクリックすると自動入力"
+              placeholder="地図クリック or 検索で自動入力"
             />
           </label>
           <br />
@@ -56,7 +60,7 @@ export default function Page() {
             <textarea name="proposal_text" />
           </label>
 
-          {/* 緯度経度も一緒に送る（将来DBに保存するため） */}
+          {/* 緯度経度（将来DBに保存する用） */}
           <input type="hidden" name="lat" value={coords.lat ?? ""} />
           <input type="hidden" name="lng" value={coords.lng ?? ""} />
 
