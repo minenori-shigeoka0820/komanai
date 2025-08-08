@@ -2,12 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Suggest = {
-  name: string;
-  address: string;
-  lat: number;
-  lng: number;
-};
+type Cand = { name: string; lat: number; lng: number; source: "exact" | "nearby"; address?: string };
 
 function debounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
   let t: any;
@@ -19,11 +14,10 @@ function debounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
 
 export default function SearchBox() {
   const [q, setQ] = useState("");
-  const [list, setList] = useState<Suggest[]>([]);
+  const [items, setItems] = useState<Cand[]>([]);
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
 
-  // 外クリックで閉じる
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
@@ -32,63 +26,40 @@ export default function SearchBox() {
     return () => document.removeEventListener("click", onDoc);
   }, []);
 
-  const doSearch = async (query: string) => {
+  const search = async (query: string) => {
     const trimmed = query.trim();
     if (!trimmed) {
-      setList([]);
+      setItems([]);
       return;
     }
-
-    // スペース区切りで AND 条件
-    const tokens = trimmed.split(/\s+/).map((s) => s.toLowerCase());
-
-    // MapTiler 前方一致サジェスト
-    const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(
-      trimmed
-    )}.json?limit=8&language=ja&country=jp&autocomplete=true&key=${
-      process.env.NEXT_PUBLIC_MAPTILER_KEY
-    }`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const out: Suggest[] =
-      data?.features
-        ?.map((f: any) => {
-          const name =
-            f?.text_ja || f?.text || f?.place_name_ja || f?.place_name || "";
-          const address =
-            f?.place_name_ja || f?.place_name || f?.properties?.address || "";
-          const [lng, lat] = f?.center || [];
-          return { name, address, lat, lng } as Suggest;
-        })
-        .filter((s: Suggest) => {
-          const hay = `${s.name} ${s.address}`.toLowerCase();
-          // AND：すべてのトークンを含むものだけ
-          return tokens.every((t) => hay.includes(t));
-        }) ?? [];
-
-    setList(out);
+    const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`);
+    const json = await res.json();
+    setItems(json.items || []);
     setOpen(true);
+
+    // もし nearby のみ多数返ってきた場合、地図上にも「候補群を描画」させる
+    if (Array.isArray(json.items) && json.items.length > 0 && json.items.every((i: Cand) => i.source === "nearby")) {
+      window.dispatchEvent(
+        new CustomEvent("komanai:candidates", { detail: { items: json.items } })
+      );
+    }
   };
 
-  // 入力の待ち合わせ（300ms）
-  const debounced = useRef(debounce(doSearch, 300)).current;
+  const debounced = useRef(debounce(search, 300)).current;
 
-  const select = (s: Suggest) => {
-    setQ(s.name || s.address);
+  const select = (c: Cand) => {
+    setQ(c.name);
     setOpen(false);
-
-    // 地図にフライ → 交差点名の逆ジオもHomeMap側で実行
+    // 地図へ：選択地点へフライ＆マーカー
     window.dispatchEvent(
-      new CustomEvent("komanai:flyto", {
-        detail: { lat: s.lat, lng: s.lng, zoom: 17 },
-      })
+      new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17 } })
     );
   };
 
+  const hasExact = items.some((i) => i.source === "exact");
+
   return (
-    <div ref={boxRef} style={{ position: "relative", maxWidth: 560 }}>
+    <div ref={boxRef} style={{ position: "relative", maxWidth: 600 }}>
       <input
         value={q}
         onChange={(e) => {
@@ -96,51 +67,47 @@ export default function SearchBox() {
           setQ(v);
           debounced(v);
         }}
-        onFocus={() => q && list.length && setOpen(true)}
-        placeholder="例）渋谷 交差点 / 表参道 青山通り など（AND検索）"
+        onFocus={() => q && items.length && setOpen(true)}
+        placeholder="例）川岸三丁目 戸田市（完全一致優先／AND）"
         style={{
-          width: "100%",
-          padding: "10px 12px",
-          border: "1px solid #ccc",
-          borderRadius: 8,
+          width: "100%", padding: "10px 12px",
+          border: "1px solid #ccc", borderRadius: 8,
         }}
       />
-      {open && list.length > 0 && (
+      {open && items.length > 0 && (
         <div
           style={{
-            position: "absolute",
-            zIndex: 20,
-            top: "110%",
-            left: 0,
-            right: 0,
-            background: "#fff",
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
-            overflow: "hidden",
+            position: "absolute", zIndex: 20, top: "110%", left: 0, right: 0,
+            background: "#fff", border: "1px solid #ddd", borderRadius: 8, boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+            overflow: "hidden"
           }}
         >
-          {list.map((s, i) => (
+          {hasExact && (
+            <div style={{ padding: "6px 10px", fontSize: 12, color: "#0a7" }}>完全一致</div>
+          )}
+          {items.map((c, idx) => (
             <button
-              key={`${s.lat},${s.lng},${i}`}
+              key={`${c.lat},${c.lng},${idx}`}
               type="button"
-              onClick={() => select(s)}
+              onClick={() => select(c)}
               style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: "10px 12px",
-                border: "none",
-                background: "white",
+                display: "block", width: "100%", textAlign: "left",
+                padding: "10px 12px", border: "none",
+                background: c.source === "exact" ? "#f8fffb" : "white",
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontWeight: 600 }}>{s.name || s.address}</div>
-              {s.name && (
-                <div style={{ fontSize: 12, color: "#555" }}>{s.address}</div>
-              )}
+              <div style={{ fontWeight: 600 }}>
+                {c.name}{c.source === "nearby" ? "（候補）" : ""}
+              </div>
+              {c.address && <div style={{ fontSize: 12, color: "#555" }}>{c.address}</div>}
             </button>
           ))}
+          {!hasExact && (
+            <div style={{ padding: "6px 10px", fontSize: 12, color: "#888" }}>
+              完全一致が見つからなかったため、近辺の交差点候補を表示しています
+            </div>
+          )}
         </div>
       )}
     </div>
