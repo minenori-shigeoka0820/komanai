@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { normalizeName, variants } from "../../../lib/normalize";
 
 type Cand = {
   name: string;
@@ -189,3 +189,4 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ items: [] });
   }
 }
+
