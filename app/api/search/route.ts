@@ -6,97 +6,106 @@ type Cand = {
   name: string;
   lat: number;
   lng: number;
-  source: "exact" | "partial" | "nearby";
-  address?: string;
+  source: "exact" | "partial";
+  city?: string;
 };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE!;
 
+// Supabase RESTでSELECT（サービスキーでサーバーからのみ呼ぶ）
 async function sbSelect(path: string) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
   const r = await fetch(url, {
     headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` },
     cache: "no-store" as any,
   });
-  return r.ok ? r.json() : [];
+  if (!r.ok) return [];
+  return r.json();
 }
 
-async function nominatimCenter(q: string) {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
-    q
-  )}&countrycodes=jp&limit=1&accept-language=ja&addressdetails=1`;
-  try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "komanai.com search" } as any,
-      cache: "no-store" as any,
-    });
-    const js = await r.json();
-    if (Array.isArray(js) && js[0]?.lat && js[0]?.lon) {
-      return { lat: parseFloat(js[0].lat), lng: parseFloat(js[0].lon) };
-    }
-  } catch {}
-  return null;
+// ざっくり「◯◯市/区/町/村」で終わる最長一致を拾う
+function pickCityHint(input: string) {
+  const m = input.match(/(.+[市区町村])/);
+  return m ? m[1].trim() : "";
 }
-
-function dedupByCoord(items: Cand[], digits = 6) {
-  const seen = new Set<string>();
-  return items.filter((it) => {
-    const key = `${it.name}|${it.lat.toFixed(digits)}|${it.lng.toFixed(digits)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-const HWY_ROAD_REGEX =
-  "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
-const NOT_BUS =
-  `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]["public_transport"!="stop_area"]`;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const raw = (searchParams.get("q") || "").trim();
   if (!raw) return NextResponse.json({ items: [] });
 
-  // cityヒント（「…市/区/町/村」で終わる最長一致をざっくり拾う）
-  const m = raw.match(/(.+[市区町村])/);
-  const cityHint = m ? m[1] : "";
+  // 正規化
+  const norm = normalizeName(raw);            // 空白除去＋漢数字→数字＋末尾「交差点」除去
+  const vlist = variants(raw);                // [基底形, 基底形+交差点]
+  const cityHint = pickCityHint(raw);         // 例：「戸田市」
 
-  // まずは Supabase キャッシュから
-  const norm = normalizeName(raw);
-  const vlist = variants(raw).map((v) => v.toLowerCase());
-  const whereCity = cityHint ? `&city=eq.${encodeURIComponent(cityHint)}` : "";
+  // city指定（あるなら絞る）
+  const cityParam = cityHint ? `&city=eq.${encodeURIComponent(cityHint)}` : "";
 
-  // 完全一致（variants）
-  const exact = await sbSelect(
-    `intersections?select=name,lat,lng,city&name_norm=in.(${vlist.map(encodeURIComponent).join(",")})${whereCity}`
+  // 1) 完全一致（name_norm = ilike でケース無視の“実質等価”）
+  //    or=(name_norm.ilike.foo,name_norm.ilike.bar)
+  const orExact = `or=(${vlist
+    .map((v) => `name_norm.ilike.${encodeURIComponent(v)}`)
+    .join(",")})`;
+
+  let exact: any[] = await sbSelect(
+    `intersections?select=name,lat,lng,city&${orExact}${cityParam}`
   );
-  if (Array.isArray(exact) && exact.length) {
-    return NextResponse.json({
-      items: exact.map((r: any) => ({ name: r.name, lat: r.lat, lng: r.lng, source: "exact" as const })),
-    });
+
+  // cityヒントが無くて0件なら、全国からもう一度
+  if ((!exact || exact.length === 0) && !cityHint) {
+    exact = await sbSelect(`intersections?select=name,lat,lng,city&${orExact}`);
   }
 
-  // 部分一致（name_norm ILIKE）
-  const partial = await sbSelect(
-    `intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(norm)}*${whereCity}`
-  );
-  if (Array.isArray(partial) && partial.length) {
-    return NextResponse.json({
-      items: (partial as any[])
-        .slice(0, 20)
-        .map((r) => ({ name: r.name, lat: r.lat, lng: r.lng, source: "partial" as const })),
-    });
+  if (exact && exact.length) {
+    const items: Cand[] = exact.map((r: any) => ({
+      name: r.name,
+      lat: r.lat,
+      lng: r.lng,
+      city: r.city,
+      source: "exact",
+    }));
+    return NextResponse.json({ items });
   }
 
-  // キャッシュ薄い → 非同期で市単位インデックス作成をキックしつつ、いまは空を返す
+  // 2) 部分一致（name_norm ILIKE %norm%）
+  let partial: any[] = await sbSelect(
+    `intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(
+      norm
+    )}*${cityParam}`
+  );
+
+  // cityヒントが無くて0件なら、全国からもう一度
+  if ((!partial || partial.length === 0) && !cityHint) {
+    partial = await sbSelect(
+      `intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(
+        norm
+      )}*`
+    );
+  }
+
+  if (partial && partial.length) {
+    // 重複をざっくり除去しつつ20件に圧縮
+    const seen = new Set<string>();
+    const items: Cand[] = [];
+    for (const r of partial) {
+      const key = `${r.name}|${r.lat.toFixed(6)}|${r.lng.toFixed(6)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({ name: r.name, lat: r.lat, lng: r.lng, city: r.city, source: "partial" });
+      if (items.length >= 20) break;
+    }
+    return NextResponse.json({ items });
+  }
+
+  // 3) ここまで0件なら、バックグラウンドで市単位インデックスを作らせる（次回から速くなる）
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "";
-  const cityToIndex = cityHint || raw; // とりあえず生入力でもOK
-  if (SERVICE_KEY) {
+  const cityToIndex = cityHint || raw; // 入力そのものでもOK
+  if (SERVICE_KEY && baseUrl) {
     fetch(`${baseUrl}/api/index-area?city=${encodeURIComponent(cityToIndex)}`).catch(() => {});
   }
 
-  // 最初は空、数秒後に再検索でヒット（キャッシュ作成後）
+  // ひとまず空を返す（インデックス完了後に再検索で出る）
   return NextResponse.json({ items: [] });
 }
