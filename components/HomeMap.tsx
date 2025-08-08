@@ -40,8 +40,47 @@ export default function HomeMap({ onSelect }: Props) {
 
       let marker: any;
 
+      // 近傍の交差点ノードへスナップ（なければ元座標）
+      async function snapToIntersection(lat: number, lng: number) {
+        // 半径60→120mまで探す
+        const radii = [60, 90, 120];
+        for (const r of radii) {
+          const q = `
+            [out:json][timeout:10];
+            (
+              node(around:${r}, ${lat}, ${lng})["highway"~"traffic_signals|stop|crossing"];
+              node(around:${r}, ${lat}, ${lng})["junction"~"yes|intersection|roundabout"];
+            );
+            out tags center 50;
+          `;
+          try {
+            const res = await fetch("https://overpass-api.de/api/interpreter", {
+              method: "POST",
+              headers: { "Content-Type": "text/plain" },
+              body: q,
+            });
+            const data = await res.json();
+            const items =
+              data?.elements?.map((e: any) => {
+                const y = e.lat ?? e.center?.lat;
+                const x = e.lon ?? e.center?.lon;
+                const d = Math.hypot(lat - y, lng - x);
+                const name = e.tags?.["name:ja"] || e.tags?.name || "";
+                return { lat: y, lng: x, d, name };
+              }) || [];
+            if (items.length) {
+              items.sort((a: any, b: any) => a.d - b.d);
+              return items[0]; // 最も近い交差点ぽいノード
+            }
+          } catch {
+            // 次の半径で再試行
+          }
+        }
+        return { lat, lng, name: "" };
+      }
+
+      // 交差点名を極力取得：Overpass（name系）→ Nominatim（住所）
       async function reverseGeocode(lat: number, lng: number) {
-        // Overpass（半径60mの信号/交差点で name/name:ja）
         const overpassQL = `
           [out:json][timeout:10];
           (
@@ -70,14 +109,10 @@ export default function HomeMap({ onSelect }: Props) {
               })
               .filter((v: any) => v.name)
               .sort((a: any, b: any) => a.d - b.d)[0];
-
-            if (pick) {
-              return { name: pick.name, address: pick.name };
-            }
+            if (pick) return { name: pick.name, address: pick.name };
           }
         } catch {}
 
-        // Nominatim フォールバック（住所）
         try {
           const nRes = await fetch(
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
@@ -98,35 +133,43 @@ export default function HomeMap({ onSelect }: Props) {
       }
 
       async function placeMarker(lat: number, lng: number, zoom?: number) {
-        if (zoom) map.setView([lat, lng], zoom);
+        // まず交差点へスナップ
+        const snapped = await snapToIntersection(lat, lng);
+        const useLat = snapped.lat ?? lat;
+        const useLng = snapped.lng ?? lng;
+
+        if (zoom) map.setView([useLat, useLng], zoom);
+        else map.setView([useLat, useLng], map.getZoom());
+
         if (marker) map.removeLayer(marker);
-        marker = L.marker([lat, lng]).addTo(map);
+        marker = L.marker([useLat, useLng]).addTo(map);
 
         try {
-          const { name, address } = await reverseGeocode(lat, lng);
+          const { name, address } = await reverseGeocode(useLat, useLng);
           marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
-          onSelect?.({ name, lat, lng, address });
+          onSelect?.({ name, lat: useLat, lng: useLng, address });
         } catch {
           marker
             .bindPopup(
-              `位置: ${lat.toFixed(5)}, ${lng.toFixed(5)}<br/><small>名称取得に失敗</small>`
+              `位置: ${useLat.toFixed(5)}, ${useLng.toFixed(5)}<br/><small>名称取得に失敗</small>`
             )
             .openPopup();
           onSelect?.({
             name: "",
-            lat,
-            lng,
-            address: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+            lat: useLat,
+            lng: useLng,
+            address: `${useLat.toFixed(5)}, ${useLng.toFixed(5)}`,
           });
         }
       }
 
+      // 地図クリック
       map.on("click", (e: any) => {
         const { lat, lng } = e.latlng;
         placeMarker(lat, lng);
       });
 
-      // 検索からのフライイベントを受け取る
+      // 検索からのフライ（SearchBox からのイベント）
       const onFly = (ev: any) => {
         const { lat, lng, zoom = 17 } = ev.detail || {};
         if (typeof lat === "number" && typeof lng === "number") {
