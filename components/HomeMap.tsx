@@ -17,6 +17,16 @@ export default function HomeMap({ onSelect }: Props) {
     (async () => {
       const L = await import("leaflet");
 
+      // ★ 重要：デフォルトアイコンのURLを明示（壊れた画像対策）
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl:
+          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+        iconUrl:
+          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+        shadowUrl:
+          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+      });
+
       // 地図初期化（ホイール拡縮ON）
       const map = L.map("map", {
         zoomControl: true,
@@ -31,9 +41,8 @@ export default function HomeMap({ onSelect }: Props) {
 
       let marker: any;
 
-      // 交差点名をできるだけ正確に取る：Overpass →（なければ）Nominatim の二段構え
+      // 交差点名をできるだけ正確に取る：Overpass →（なければ）Nominatim
       async function reverseGeocode(lat: number, lng: number) {
-        // 1) Overpass（半径60mの信号/交差点にname/name:jaがあれば拾う）
         const overpassQL = `
           [out:json][timeout:10];
           (
@@ -64,17 +73,13 @@ export default function HomeMap({ onSelect }: Props) {
               .sort((a: any, b: any) => a.d - b.d)[0];
 
             if (pick) {
-              return {
-                name: pick.name,
-                address: pick.name,
-              };
+              return { name: pick.name, address: pick.name };
             }
           }
         } catch {
-          // Overpass失敗時はフォールバックへ
+          // noop
         }
 
-        // 2) Nominatim（住所ベース、日本語優先）
         try {
           const nRes = await fetch(
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
@@ -97,7 +102,6 @@ export default function HomeMap({ onSelect }: Props) {
       map.on("click", async (e: any) => {
         const { lat, lng } = e.latlng;
 
-        // 既存マーカーを置き換え
         if (marker) map.removeLayer(marker);
         marker = L.marker([lat, lng]).addTo(map);
 
@@ -105,7 +109,7 @@ export default function HomeMap({ onSelect }: Props) {
           const { name, address } = await reverseGeocode(lat, lng);
           marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
           onSelect?.({ name, lat, lng, address });
-        } catch (_err) {
+        } catch {
           marker
             .bindPopup(
               `位置: ${lat.toFixed(5)}, ${lng.toFixed(5)}<br/><small>名称取得に失敗</small>`
