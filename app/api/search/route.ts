@@ -4,7 +4,7 @@ type Cand = {
   name: string;
   lat: number;
   lng: number;
-  source: "exact" | "nearby";
+  source: "exact" | "partial" | "nearby";
   address?: string;
 };
 
@@ -25,42 +25,52 @@ async function nominatimCenter(q: string) {
   return null;
 }
 
+function dedupByCoord(items: Cand[], digits = 6) {
+  const seen = new Set<string>();
+  return items.filter((it) => {
+    const key = `${it.name}|${it.lat.toFixed(digits)}|${it.lng.toFixed(digits)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// 実道路のhighwayのみを許可（バス停・歩道等を除外）
+const HWY_ROAD_REGEX = "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
+// バス関連の除外条件
+const NOT_BUS = `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]`;
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const q = (searchParams.get("q") || "").trim();
-  if (!q) return NextResponse.json({ items: [] });
+  const raw = (searchParams.get("q") || "").trim();
+  if (!raw) return NextResponse.json({ items: [] });
 
-  // クエリから「市/区/町/村」を含むかで中心を推定
-  const hasCityToken = /[市区町村]($|\s)/.test(q);
-  const center = hasCityToken ? await nominatimCenter(q) : null;
+  // 正規化：空白除去＆「交差点」付きを両方見る
+  const norm = raw.replace(/\s+/g, "");
+  const variants = Array.from(new Set([norm, norm.endsWith("交差点") ? norm : norm + "交差点"]));
 
-  // 1) 完全一致（name / name:ja）のみを探索（大文字小文字無視）
-  //    - 中心が取れていれば around:1500m に限定
-  //    - 取れない場合は全国だが、交通関連の要素に絞って最大100件
-  const term = q.replace(/\s+/g, ""); // 空白差を吸収
-  const eq = `^${term}$`;
-  const areaAround = center
-    ? `node(around:1500, ${center.lat}, ${center.lng})`
-    : "node";
-  const wayAround = center
-    ? `way(around:1500, ${center.lat}, ${center.lng})`
-    : "way";
+  const hasCityToken = /[市区町村]/.test(raw);
+  const center = hasCityToken ? await nominatimCenter(raw) : null;
 
+  const nodeAround = center ? (r: number) => `node(around:${r}, ${center.lat}, ${center.lng})` : (_: number) => `node`;
+  const wayAround  = center ? (r: number) => `way(around:${r}, ${center.lat}, ${center.lng})`  : (_: number) => `way`;
+
+  // 1) 完全一致（バス停等を除外、実道路＆交差・信号に絞る）
+  const regAlternation = variants.map(v => `^${v}$`).join("|");
   const overpassExact = `
-    [out:json][timeout:20];
+    [out:json][timeout:25];
     (
-      ${areaAround}["highway"]["name"~"${eq}",i];
-      ${areaAround}["highway"]["name:ja"~"${eq}",i];
-      ${areaAround}["highway"~"traffic_signals|stop|crossing"]["name"~"${eq}",i];
-      ${areaAround}["junction"]["name"~"${eq}",i];
+      ${nodeAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${regAlternation}",i]${NOT_BUS};
+      ${nodeAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${regAlternation}",i]${NOT_BUS};
+      ${nodeAround(1500)}["highway"~"traffic_signals|stop|crossing"]["name"~"${regAlternation}",i]${NOT_BUS};
+      ${nodeAround(1500)}["junction"]["name"~"${regAlternation}",i]${NOT_BUS};
 
-      ${wayAround}["highway"]["name"~"${eq}",i];
-      ${wayAround}["highway"]["name:ja"~"${eq}",i];
-      ${wayAround}["junction"]["name"~"${eq}",i];
+      ${wayAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${regAlternation}",i]${NOT_BUS};
+      ${wayAround(1500)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${regAlternation}",i]${NOT_BUS};
+      ${wayAround(1500)}["junction"]["name"~"${regAlternation}",i]${NOT_BUS};
     );
-    out tags center 100;
+    out tags center 150;
   `;
-
   try {
     const oRes = await fetch("https://overpass-api.de/api/interpreter", {
       method: "POST",
@@ -74,24 +84,15 @@ export async function GET(req: NextRequest) {
         .map((e: any) => {
           const y = e.lat ?? e.center?.lat;
           const x = e.lon ?? e.center?.lon;
-          const raw = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
-          if (!y || !x || !raw) return null;
-          // スペース無視で完全一致確認
-          const norm = raw.replace(/\s+/g, "");
-          if (norm.toLowerCase() !== term.toLowerCase()) return null;
-          return { name: raw, lat: y, lng: x, source: "exact" as const };
+          const name = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
+          if (!y || !x || !name) return null;
+          const n = name.replace(/\s+/g, "");
+          if (!variants.some(v => n.toLowerCase() === v.toLowerCase())) return null;
+          return { name, lat: y, lng: x, source: "exact" as const };
         })
         .filter(Boolean) as Cand[];
-
-    // 重複除去＆近い順
     if (exact.length) {
-      const seen = new Set<string>();
-      exact = exact.filter((it) => {
-        const key = `${it.name}|${it.lat.toFixed(6)}|${it.lng.toFixed(6)}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      exact = dedupByCoord(exact);
       if (center) {
         exact.sort(
           (a, b) =>
@@ -103,18 +104,64 @@ export async function GET(req: NextRequest) {
     }
   } catch {}
 
-  // 2) 完全一致なし → 近傍候補（中心がなければまず中心を取る）
-  const nearCenter = center ?? (await nominatimCenter(q));
+  // 2) 部分一致（こちらもバス停等を除外＋中心付近に限定）
+  if (center) {
+    const overpassPartial = `
+      [out:json][timeout:25];
+      (
+        ${nodeAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${norm}",i]${NOT_BUS};
+        ${nodeAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${norm}",i]${NOT_BUS};
+        ${nodeAround(3000)}["highway"~"traffic_signals|stop|crossing"]["name"~"${norm}",i]${NOT_BUS};
+        ${nodeAround(3000)}["junction"]["name"~"${norm}",i]${NOT_BUS};
+
+        ${wayAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${norm}",i]${NOT_BUS};
+        ${wayAround(3000)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${norm}",i]${NOT_BUS};
+        ${wayAround(3000)}["junction"]["name"~"${norm}",i]${NOT_BUS};
+      );
+      out tags center 200;
+    `;
+    try {
+      const r = await fetch("https://overpass-api.de/api/interpreter", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: overpassPartial,
+        cache: "no-store" as any,
+      });
+      const d = await r.json();
+      let partial: Cand[] =
+        (d?.elements ?? [])
+          .map((e: any) => {
+            const y = e.lat ?? e.center?.lat;
+            const x = e.lon ?? e.center?.lon;
+            const name = (e.tags?.["name:ja"] || e.tags?.name || "").trim();
+            return y && x ? { name: name || "交差点（部分一致）", lat: y, lng: x, source: "partial" as const } : null;
+          })
+          .filter(Boolean) as Cand[];
+
+      if (partial.length) {
+        partial = dedupByCoord(partial);
+        partial.sort(
+          (a, b) =>
+            Math.hypot(a.lat - center.lat, a.lng - center.lng) -
+            Math.hypot(b.lat - center.lat, b.lng - center.lng)
+        );
+        return NextResponse.json({ items: partial.slice(0, 20) });
+      }
+    } catch {}
+  }
+
+  // 3) 近傍候補（信号/交差ノードのみ）
+  const nearCenter = center ?? (await nominatimCenter(raw));
   if (!nearCenter) return NextResponse.json({ items: [] });
 
   const overpassNearby = `
     [out:json][timeout:20];
     (
-      node(around:300, ${nearCenter.lat}, ${nearCenter.lng})["highway"~"traffic_signals|stop|crossing"];
-      node(around:300, ${nearCenter.lat}, ${nearCenter.lng})["junction"~"yes|intersection|roundabout"];
-      way(around:300, ${nearCenter.lat}, ${nearCenter.lng})["junction"]["name"];
+      node(around:400, ${nearCenter.lat}, ${nearCenter.lng})["highway"~"traffic_signals|stop|crossing"]${NOT_BUS};
+      node(around:400, ${nearCenter.lat}, ${nearCenter.lng})["junction"~"yes|intersection|roundabout"]${NOT_BUS};
+      way(around:400, ${nearCenter.lat}, ${nearCenter.lng})["junction"]["name"]${NOT_BUS};
     );
-    out tags center 120;
+    out tags center 200;
   `;
   try {
     const r = await fetch("https://overpass-api.de/api/interpreter", {
@@ -131,21 +178,13 @@ export async function GET(req: NextRequest) {
         const name = (e.tags?.["name:ja"] || e.tags?.name || "交差点候補").trim();
         return { name, lat, lng, source: "nearby" as const };
       }) || [];
-    // 近い順＋重複除去
+    items = dedupByCoord(items);
     items.sort(
       (a, b) =>
         Math.hypot(a.lat - nearCenter.lat, a.lng - nearCenter.lng) -
         Math.hypot(b.lat - nearCenter.lat, b.lng - nearCenter.lng)
     );
-    const seen = new Set<string>();
-    items = items.filter((it) => {
-      const key = `${it.lat.toFixed(6)}|${it.lng.toFixed(6)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, 12);
-
-    return NextResponse.json({ items });
+    return NextResponse.json({ items: items.slice(0, 20) });
   } catch {
     return NextResponse.json({ items: [] });
   }
