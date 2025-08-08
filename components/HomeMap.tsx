@@ -17,54 +17,105 @@ export default function HomeMap({ onSelect }: Props) {
     (async () => {
       const L = await import("leaflet");
 
+      // 地図初期化（ホイール拡縮ON）
       const map = L.map("map", {
         zoomControl: true,
-        scrollWheelZoom: true,   // ← マウスホイール拡縮を有効に
+        scrollWheelZoom: true,
         dragging: true,
       }).setView([35.681236, 139.767125], 11);
 
-      const tile = L.tileLayer(
+      L.tileLayer(
         `https://api.maptiler.com/maps/streets/{z}/{x}/{y}.png?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`,
         { attribution: "&copy; OpenStreetMap contributors" }
       ).addTo(map);
 
       let marker: any;
 
+      // 交差点名をできるだけ正確に取る：Overpass →（なければ）Nominatim の二段構え
       async function reverseGeocode(lat: number, lng: number) {
-        // MapTilerの逆ジオ（経度,緯度の順！）
-        const url = `https://api.maptiler.com/geocoding/${lng},${lat}.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}&limit=1&language=ja`;
-        const res = await fetch(url);
-        const data = await res.json();
-        const f = data?.features?.[0];
+        // 1) Overpass（半径60mの信号/交差点にname/name:jaがあれば拾う）
+        const overpassQL = `
+          [out:json][timeout:10];
+          (
+            node(around:60, ${lat}, ${lng})["highway"~"traffic_signals|stop|crossing"]["name"];
+            node(around:60, ${lat}, ${lng})["junction"]["name"];
+            way(around:60, ${lat}, ${lng})["junction"]["name"];
+          );
+          out tags center 20;
+        `;
+        try {
+          const oRes = await fetch("https://overpass-api.de/api/interpreter", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: overpassQL,
+          });
+          const oData = await oRes.json();
+          if (oData?.elements?.length) {
+            const pick = oData.elements
+              .map((e: any) => {
+                const y = e.lat ?? e.center?.lat;
+                const x = e.lon ?? e.center?.lon;
+                const d = Math.hypot(lat - y, lng - x);
+                const tags = e.tags || {};
+                const name = tags["name:ja"] || tags["name"] || "";
+                return { d, name };
+              })
+              .filter((v: any) => v.name)
+              .sort((a: any, b: any) => a.d - b.d)[0];
 
-        // 候補名（交差点名っぽいテキスト）と住所候補
-        const name =
-          f?.text_ja || f?.text || f?.place_name_ja || f?.place_name || "名称未取得";
-        const address =
-          f?.place_name_ja || f?.place_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            if (pick) {
+              return {
+                name: pick.name,
+                address: pick.name,
+              };
+            }
+          }
+        } catch {
+          // Overpass失敗時はフォールバックへ
+        }
 
-        return { name, address };
+        // 2) Nominatim（住所ベース、日本語優先）
+        try {
+          const nRes = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
+            { headers: { "User-Agent": "komanai.com demo" } as any }
+          );
+          const n = await nRes.json();
+          const name =
+            n?.namedetails?.["name:ja"] ||
+            n?.namedetails?.name ||
+            n?.name ||
+            "";
+          const address =
+            n?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+          return { name: name || "名称未取得", address };
+        } catch {
+          return { name: "", address: `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+        }
       }
 
       map.on("click", async (e: any) => {
         const { lat, lng } = e.latlng;
 
-        // マーカーを更新
+        // 既存マーカーを置き換え
         if (marker) map.removeLayer(marker);
         marker = L.marker([lat, lng]).addTo(map);
 
         try {
           const { name, address } = await reverseGeocode(lat, lng);
           marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
-
           onSelect?.({ name, lat, lng, address });
-        } catch (err) {
-          marker.bindPopup(`位置: ${lat.toFixed(5)}, ${lng.toFixed(5)}<br/><small>名称取得に失敗</small>`).openPopup();
+        } catch (_err) {
+          marker
+            .bindPopup(
+              `位置: ${lat.toFixed(5)}, ${lng.toFixed(5)}<br/><small>名称取得に失敗</small>`
+            )
+            .openPopup();
           onSelect?.({
             name: "",
             lat,
             lng,
-            address: `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+            address: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
           });
         }
       });
