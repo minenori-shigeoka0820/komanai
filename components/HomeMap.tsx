@@ -195,10 +195,9 @@ export default function HomeMap({ onSelect }: Props) {
 
       // SearchBox からの「候補群を描画」イベント
       const onCandidates = (ev: any) => {
-        const arr = (ev.detail?.items || []).map((x: any) => ({
-          lat: x.lat,
-          lng: x.lng,
-        }));
+        const arr: { lat: number; lng: number }[] = (ev.detail?.items || []).map(
+          (x: any) => ({ lat: x.lat, lng: x.lng })
+        );
 
         // 既存候補レイヤーをクリア
         if (candidateLayer) {
@@ -209,7 +208,7 @@ export default function HomeMap({ onSelect }: Props) {
 
         candidateLayer = (L as any)
           .layerGroup(
-            arr.map((p) =>
+            arr.map((p: { lat: number; lng: number }) =>
               (L as any)
                 .circleMarker([p.lat, p.lng], {
                   radius: 6,
