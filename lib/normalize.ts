@@ -10,11 +10,10 @@ export function normalizeName(raw: string) {
   if (!raw) return "";
   const noSpace = raw.replace(/\s+/g, "");
   const num = kanjiNumToArabic(noSpace);
-  return num.replace(/交差点$/, ""); // 末尾の「交差点」を外して基底形に
+  return num.replace(/交差点$/, "");
 }
 
 export function variants(raw: string) {
   const base = normalizeName(raw);
   return Array.from(new Set([base, base + "交差点"]));
 }
-
