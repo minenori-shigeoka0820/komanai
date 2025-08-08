@@ -17,7 +17,7 @@ export default function HomeMap({ onSelect }: Props) {
     (async () => {
       const L = await import("leaflet");
 
-      // ★ 重要：デフォルトアイコンのURLを明示（壊れた画像対策）
+      // 壊れ画像対策：デフォルトアイコンURLを指定
       L.Icon.Default.mergeOptions({
         iconRetinaUrl:
           "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -27,7 +27,6 @@ export default function HomeMap({ onSelect }: Props) {
           "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
       });
 
-      // 地図初期化（ホイール拡縮ON）
       const map = L.map("map", {
         zoomControl: true,
         scrollWheelZoom: true,
@@ -41,8 +40,8 @@ export default function HomeMap({ onSelect }: Props) {
 
       let marker: any;
 
-      // 交差点名をできるだけ正確に取る：Overpass →（なければ）Nominatim
       async function reverseGeocode(lat: number, lng: number) {
+        // Overpass（半径60mの信号/交差点で name/name:ja）
         const overpassQL = `
           [out:json][timeout:10];
           (
@@ -76,10 +75,9 @@ export default function HomeMap({ onSelect }: Props) {
               return { name: pick.name, address: pick.name };
             }
           }
-        } catch {
-          // noop
-        }
+        } catch {}
 
+        // Nominatim フォールバック（住所）
         try {
           const nRes = await fetch(
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
@@ -99,9 +97,8 @@ export default function HomeMap({ onSelect }: Props) {
         }
       }
 
-      map.on("click", async (e: any) => {
-        const { lat, lng } = e.latlng;
-
+      async function placeMarker(lat: number, lng: number, zoom?: number) {
+        if (zoom) map.setView([lat, lng], zoom);
         if (marker) map.removeLayer(marker);
         marker = L.marker([lat, lng]).addTo(map);
 
@@ -122,7 +119,22 @@ export default function HomeMap({ onSelect }: Props) {
             address: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
           });
         }
+      }
+
+      map.on("click", (e: any) => {
+        const { lat, lng } = e.latlng;
+        placeMarker(lat, lng);
       });
+
+      // 検索からのフライイベントを受け取る
+      const onFly = (ev: any) => {
+        const { lat, lng, zoom = 17 } = ev.detail || {};
+        if (typeof lat === "number" && typeof lng === "number") {
+          placeMarker(lat, lng, zoom);
+        }
+      };
+      window.addEventListener("komanai:flyto", onFly);
+      return () => window.removeEventListener("komanai:flyto", onFly);
     })();
   }, [onSelect]);
 
