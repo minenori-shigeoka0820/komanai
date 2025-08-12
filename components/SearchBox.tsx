@@ -52,7 +52,11 @@ export default function SearchBox() {
     const res = await fetch(url.toString(), { cache: "no-store" });
     const js = await res.json();
     const arr: Cand[] = js.items || [];
-    arr.sort((a, b) => ({ exact: 0, live: 1, partial: 2 }[a.source] - ({ exact: 0, live: 1, partial: 2 }[b.source]));
+
+    // ✅ 修正：わかりやすくランク表を使う
+    const rank = { exact: 0, live: 1, partial: 2 } as const;
+    arr.sort((a, b) => rank[a.source] - rank[b.source]);
+
     setItems(arr);
     setOpen(true);
 
@@ -106,9 +110,8 @@ export default function SearchBox() {
         setMsg(`保存に失敗しました: ${js?.error || r.statusText}`);
       } else {
         setMsg("保存しました。ご協力ありがとうございます！");
-        // 投稿後は軽くクリア
         setDraftName("");
-        // 住所と座標は残して次の投稿もしやすく
+        // 住所と座標は残す：連続投稿しやすくするため
       }
     } catch (e: any) {
       setMsg(`保存に失敗しました: ${e?.message || "unknown error"}`);
