@@ -1,111 +1,154 @@
 "use client";
+import { useState } from "react";
 
-import { useEffect, useRef, useState } from "react";
-
-type Cand = { name: string; lat: number; lng: number; source: "exact" | "partial" | "live"; city?: string };
+type Cand = { name: string; lat: number; lng: number; city?: string; source: "exact" | "partial" | "live" };
 
 export default function SearchBox() {
   const [q, setQ] = useState("");
   const [items, setItems] = useState<Cand[]>([]);
   const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("click", onDoc);
-    return () => document.removeEventListener("click", onDoc);
-  }, []);
 
   async function runSearch() {
     const s = q.trim();
-    if (!s) { setItems([]); setOpen(false); return; }
-    const res = await fetch(`/api/search?q=${encodeURIComponent(s)}`, { cache: "no-store" });
+    if (!s) {
+      setItems([]);
+      setOpen(false);
+      return;
+    }
+    // 現在の地図中心を取得（HomeMap.tsx側でwindow.__komanai_viewを更新）
+    // @ts-ignore
+    const view = (window.__komanai_view as { lat: number; lng: number }) || null;
+
+    const url = new URL(`/api/search`, window.location.origin);
+    url.searchParams.set("q", s);
+    if (view) {
+      url.searchParams.set("lat", String(view.lat));
+      url.searchParams.set("lng", String(view.lng));
+    }
+
+    const res = await fetch(url.toString(), { cache: "no-store" });
     const js = await res.json();
     const arr: Cand[] = js.items || [];
-    arr.sort((a,b)=>{
-      const rank = { exact: 0, live: 1, partial: 2 } as const;
-      return rank[a.source] - rank[b.source];
-    });
+
+    // ソース優先度: exact > live > partial
+    arr.sort(
+      (a, b) =>
+        ({ exact: 0, live: 1, partial: 2 }[a.source] -
+        ({ exact: 0, live: 1, partial: 2 }[b.source]))
+    );
+
     setItems(arr);
     setOpen(true);
 
-    if (arr.length > 0 && arr.every(i => i.source !== "exact")) {
-      window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: arr } }));
+    if (arr.length > 0 && arr.every((i) => i.source !== "exact")) {
+      // 候補マーカー表示
+      window.dispatchEvent(
+        new CustomEvent("komanai:candidates", { detail: { items: arr } })
+      );
     } else {
-      window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
+      window.dispatchEvent(
+        new CustomEvent("komanai:candidates", { detail: { items: [] } })
+      );
     }
   }
 
-  function select(c: Cand) {
-    setQ(c.name);
+  function flyTo(lat: number, lng: number, name: string) {
+    window.dispatchEvent(
+      new CustomEvent("komanai:flyto", { detail: { lat, lng, zoom: 17, name } })
+    );
     setOpen(false);
-    // ★ 名前も一緒に渡す
-    window.dispatchEvent(new CustomEvent("komanai:flyto", {
-      detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name }
-    }));
   }
 
   function resetAll() {
     setQ("");
     setItems([]);
     setOpen(false);
-    window.dispatchEvent(new CustomEvent("komanai:reset"));
-    window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
+    window.dispatchEvent(new Event("komanai:reset"));
   }
 
   return (
-    <div ref={boxRef} style={{ position: "relative", maxWidth: 680, zIndex: 10001 }}>
-      <div style={{ display: "flex", gap: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", gap: 4 }}>
         <input
+          type="text"
           value={q}
+          placeholder="交差点名や地名を入力"
           onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
-          placeholder="例）大六天 所沢市 / 藤沢 入間市（Enter か 検索ボタン）"
-          style={{ flex: 1, padding: "10px 12px", border: "1px solid #ccc", borderRadius: 8, background: "#fff" }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") runSearch();
+          }}
+          style={{
+            flex: 1,
+            padding: "8px",
+            border: "1px solid #ccc",
+            borderRadius: 4,
+          }}
         />
-        <button onClick={runSearch} style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #0a7", background: "#0a7", color: "#fff", cursor: "pointer" }}>
+        <button
+          onClick={runSearch}
+          style={{
+            padding: "8px 12px",
+            background: "#1976d2",
+            color: "#fff",
+            border: "none",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
           検索
         </button>
-        <button onClick={resetAll} style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #999", background: "#fff", color: "#333", cursor: "pointer" }}>
+        <button
+          onClick={resetAll}
+          style={{
+            padding: "8px 12px",
+            background: "#aaa",
+            color: "#fff",
+            border: "none",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
           リセット
         </button>
       </div>
 
       {open && items.length > 0 && (
-        <div
+        <ul
           style={{
-            position: "absolute", zIndex: 10000, top: "110%", left: 0, right: 0,
-            background: "#fff", border: "1px solid #ddd", borderRadius: 8,
-            boxShadow: "0 8px 22px rgba(0,0,0,0.12)", overflow: "hidden"
+            listStyle: "none",
+            margin: 0,
+            padding: 0,
+            border: "1px solid #ccc",
+            borderRadius: 4,
+            maxHeight: 200,
+            overflowY: "auto",
+            background: "#fff",
+            zIndex: 10,
           }}
         >
-          {items.map((c, idx) => (
-            <button
-              key={`${c.lat},${c.lng},${idx}`}
-              type="button"
-              onClick={() => select(c)}
+          {items.map((item, idx) => (
+            <li
+              key={idx}
+              onClick={() => flyTo(item.lat, item.lng, item.name)}
               style={{
-                display: "block", width: "100%", textAlign: "left",
-                padding: "10px 12px", border: "none",
-                background:
-                  c.source === "exact" ? "#f8fffb" :
-                  c.source === "live"  ? "#f7fbff" : "#fff",
+                padding: "8px",
                 cursor: "pointer",
+                borderBottom: "1px solid #eee",
               }}
             >
-              <div style={{ fontWeight: 600 }}>
-                {c.name}
-                <span style={{ fontSize: 12, color: "#888", marginLeft: 8 }}>
-                  {c.source === "exact" ? "（キャッシュ完全一致）" :
-                   c.source === "live"  ? "（ライブ一致）" : "（部分一致）"}
-                  {c.city ? ` / ${c.city}` : ""}
+              {item.name}
+              {item.city && (
+                <span style={{ color: "#666", marginLeft: 4 }}>
+                  ({item.city})
                 </span>
-              </div>
-            </button>
+              )}
+            </li>
           ))}
-        </div>
+        </ul>
+      )}
+
+      {open && items.length === 0 && (
+        <div style={{ padding: "8px", color: "#666" }}>該当なし</div>
       )}
     </div>
   );
