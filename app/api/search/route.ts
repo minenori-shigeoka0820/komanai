@@ -2,7 +2,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeName, kanjiNumToArabic, variants } from "../../../lib/normalize";
 
-// ===== Types =====
 type Cand = {
   name: string;
   lat: number;
@@ -11,11 +10,10 @@ type Cand = {
   city?: string | null;
 };
 
-// ===== ENV =====
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE!;
 
-// ===== Supabase REST helpers =====
+// ----- Supabase -----
 async function sbSelect(path: string) {
   if (!SUPABASE_URL || !SERVICE_KEY) return [];
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -38,7 +36,7 @@ async function sbUpsert(rows: any[]) {
   }).catch(() => {});
 }
 
-// ===== Misc helpers =====
+// ----- Helpers -----
 function dist(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
   return Math.hypot(a.lat - b.lat, a.lng - b.lng);
 }
@@ -62,7 +60,7 @@ async function withTimeout<T>(p: Promise<T>, ms = 10000): Promise<T> {
   }
 }
 
-// ===== Overpass =====
+// ----- Overpass -----
 const HWY_ROAD_REGEX =
   "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
 const NOT_BUS =
@@ -85,7 +83,7 @@ async function overpassExactNear(center: { lat: number; lng: number }, vlist: st
   `;
   const r = await fetch("https://overpass-api.de/api/interpreter", {
     method: "POST",
-    headers: { "Content-Type": "text/plain", "User-Agent": "komanai search" } as any,
+    headers: { "Content-Type": "text/plain" },
     body: q,
   });
   const js = await r.json();
@@ -116,7 +114,7 @@ async function overpassExactNationwide(vlist: string[]) {
   `;
   const r = await fetch("https://overpass-api.de/api/interpreter", {
     method: "POST",
-    headers: { "Content-Type": "text/plain", "User-Agent": "komanai search" } as any,
+    headers: { "Content-Type": "text/plain" },
     body: q,
   });
   const js = await r.json();
@@ -153,25 +151,7 @@ async function enrichCity(rows: { name: string; lat: number; lng: number }[], n 
   return out;
 }
 
-// ===== Optional: simple in-memory rate limit =====
-const BUCKET = new Map<string, { ts: number[] }>();
-function rateLimit(req: NextRequest, max = 5, windowMs = 10_000) {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "0.0.0.0";
-  const now = Date.now();
-  const b = BUCKET.get(ip) ?? { ts: [] };
-  b.ts = b.ts.filter((t) => now - t < windowMs);
-  if (b.ts.length >= max) return false;
-  b.ts.push(now);
-  BUCKET.set(ip, b);
-  return true;
-}
-
-// ===== Handler =====
 export async function GET(req: NextRequest) {
-  if (!rateLimit(req)) {
-    return NextResponse.json({ items: [] }, { status: 429 });
-  }
-
   const { searchParams } = new URL(req.url);
   const raw = (searchParams.get("q") || "").trim();
   const lat = parseFloat(searchParams.get("lat") || "");
@@ -180,10 +160,7 @@ export async function GET(req: NextRequest) {
 
   if (!raw) return NextResponse.json({ items: [] });
 
-  // 禁止：クエリ文字列を Nominatim で再ジオコーディング → しない
-  // 許可：Supabaseキャッシュ → 近傍Overpass(完全一致) → 全国完全一致 の順
-
-  const cityHint = pickCityHint(raw); // 並べ替え用
+  const cityHint = pickCityHint(raw);     // 並べ替え用
   const bare = stripCity(raw);
   const base = normalizeName(bare);
   const vlist = variants(bare).map((v) => v.toLowerCase());
