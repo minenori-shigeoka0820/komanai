@@ -1,5 +1,5 @@
-// 変更済みの全文（前回版に2点追加）
 "use client";
+
 import { useEffect } from "react";
 import "leaflet/dist/leaflet.css";
 
@@ -31,19 +31,23 @@ export default function HomeMap({ onSelect }: Props) {
       let marker: any;
       let candidateLayer: any;
 
-      // ★ 追加1: 現在中心を共有（初期表示時）
+      // 地図中心を検索に共有
       // @ts-ignore
       window.__komanai_view = { lat: DEFAULT.lat, lng: DEFAULT.lng };
+      map.on("moveend", () => {
+        const c = map.getCenter();
+        // @ts-ignore
+        window.__komanai_view = { lat: c.lat, lng: c.lng };
+      });
 
       async function reverseGeocode(lat: number, lng: number) {
         try {
-          const nRes = await fetch(
+          const r = await fetch(
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
             { headers: { "User-Agent": "komanai.com demo" } as any }
           );
-          const n = await nRes.json();
-          const address = n?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-          return address;
+          const js = await r.json();
+          return js?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
         } catch {
           return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
         }
@@ -54,45 +58,41 @@ export default function HomeMap({ onSelect }: Props) {
         if (typeof zoom === "number") map.setView([lat, lng], zoom); else map.setView([lat, lng]);
         if (marker) map.removeLayer(marker);
         marker = (L as any).marker([lat, lng]).addTo(map);
+
         const address = await reverseGeocode(lat, lng);
-        const title = preferredName && preferredName.trim() ? preferredName : "";
-        const header = title || "地点";
-        marker.bindPopup(`${header}<br/><small>${address}</small>`).openPopup();
-        onSelect?.({ name: title || "", lat, lng, address });
+        const title = preferredName && preferredName.trim() ? preferredName : "地点";
+        marker.bindPopup(`${title}<br/><small>${address}</small>`).openPopup();
+
+        // 投稿フォームへ通知（名称は検索時のみ渡される想定）
+        window.dispatchEvent(new CustomEvent("komanai:picked", { detail: { lat, lng, address } }));
+        onSelect?.({ name: preferredName || "", lat, lng, address });
       }
 
+      // クリックで選択＆投稿候補に
       map.on("click", (e: any) => {
         const { lat, lng } = e.latlng;
         placeMarker(lat, lng);
       });
 
+      // 検索から移動（名称は検索候補を優先表示）
       const onFly = (ev: any) => {
         const { lat, lng, zoom = 17, name } = ev.detail || {};
-        if (typeof lat === "number" && typeof lng === "number") {
-          placeMarker(lat, lng, zoom, name);
-        }
+        if (typeof lat === "number" && typeof lng === "number") placeMarker(lat, lng, zoom, name);
       };
       window.addEventListener("komanai:flyto", onFly);
 
+      // 候補群描画
       const onCandidates = (ev: any) => {
         const arr: { lat: number; lng: number }[] = (ev.detail?.items || []).map((x: any) => ({ lat: x.lat, lng: x.lng }));
         if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); }
         if (!arr.length) return;
         candidateLayer = (L as any).layerGroup(
-          arr.map((p) =>
-            (L as any).circleMarker([p.lat, p.lng], { radius: 6, weight: 2, color: "red", fillOpacity: 0.5 }).bindTooltip("候補")
-          )
+          arr.map((p) => (L as any).circleMarker([p.lat, p.lng], { radius: 6, weight: 2, color: "red", fillOpacity: 0.5 }).bindTooltip("候補"))
         ).addTo(map);
       };
       window.addEventListener("komanai:candidates", onCandidates);
 
-      // ★ 追加2: 地図移動後も中心を共有
-      map.on("moveend", () => {
-        const c = map.getCenter();
-        // @ts-ignore
-        window.__komanai_view = { lat: c.lat, lng: c.lng };
-      });
-
+      // リセット
       const onReset = () => {
         if (marker) { map.removeLayer(marker); marker = null; }
         if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); candidateLayer = null; }
