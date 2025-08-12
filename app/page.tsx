@@ -1,7 +1,7 @@
 // app/page.tsx
-import SearchBox from "@/components/SearchBox";
-import HomeMap from "@/components/HomeMap";
-import RegisterPrompt from "@/components/RegisterPrompt";
+import SearchBox from "../components/SearchBox";
+import HomeMap from "../components/HomeMap";
+import RegisterPrompt from "../components/RegisterPrompt";
 
 export default function Page() {
   return (
