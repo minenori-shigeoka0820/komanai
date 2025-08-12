@@ -1,4 +1,3 @@
-// app/api/search/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeName, kanjiNumToArabic, variants } from "../../../lib/normalize";
 
@@ -27,16 +26,17 @@ async function sbUpsert(rows: any[]) {
   }).catch(()=>{});
 }
 
-// ── ユーティリティ ─────────────────────────────────────────────
 function pickCityHint(input: string) {
   const tokens = input.split(/[\s　]+/).filter(Boolean);
   const cand = tokens.filter(t => /[市区町村]$/.test(t));
   return cand.length ? cand[cand.length - 1] : "";
 }
 function stripCity(input: string) {
-  // 最後の「◯◯市/区/町/村」を取り去った残り
   const c = pickCityHint(input);
   return c ? input.replace(new RegExp(`[\\s　]*${c}$`), "") : input;
+}
+function dist(a:{lat:number,lng:number}, b:{lat:number,lng:number}) {
+  return Math.hypot(a.lat-b.lat, a.lng-b.lng);
 }
 
 async function nominatimCenter(q: string) {
@@ -56,7 +56,6 @@ const HWY_ROAD_REGEX =
 const NOT_BUS =
   `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]["public_transport"!="stop_area"]`;
 
-// 近傍 “完全一致”
 async function overpassExact(center: {lat:number,lng:number}|null, vlist: string[], radius = 6000) {
   const aroundNode = center ? (r:number)=>`node(around:${r},${center.lat},${center.lng})` : (_:number)=>`node`;
   const aroundWay  = center ? (r:number)=>`way(around:${r},${center.lat},${center.lng})`  : (_:number)=>`way`;
@@ -68,7 +67,6 @@ async function overpassExact(center: {lat:number,lng:number}|null, vlist: string
       ${aroundNode(radius)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${alt}",i]${NOT_BUS};
       ${aroundNode(radius)}["highway"~"traffic_signals|stop|crossing"]["name"~"${alt}",i]${NOT_BUS};
       ${aroundNode(radius)}["junction"]["name"~"${alt}",i]${NOT_BUS};
-
       ${aroundWay(radius)}["highway"~"${HWY_ROAD_REGEX}"]["name"~"${alt}",i]${NOT_BUS};
       ${aroundWay(radius)}["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${alt}",i]${NOT_BUS};
       ${aroundWay(radius)}["junction"]["name"~"${alt}",i]${NOT_BUS};
@@ -84,8 +82,6 @@ async function overpassExact(center: {lat:number,lng:number}|null, vlist: string
       return lat && lng && name ? { name, lat, lng } : null;
     }).filter(Boolean) as {name:string,lat:number,lng:number}[];
 }
-
-// 近傍 “部分一致”
 async function overpassPartial(center: {lat:number,lng:number}|null, needle: string, radius = 4000) {
   if (!center) return [];
   const q = `
@@ -114,53 +110,62 @@ async function overpassPartial(center: {lat:number,lng:number}|null, needle: str
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const raw = (searchParams.get("q") || "").trim();
+  const lat = parseFloat(searchParams.get("lat") || "");
+  const lng = parseFloat(searchParams.get("lng") || "");
+  const view = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+
   if (!raw) return NextResponse.json({ items: [] });
 
-  const cityHint = pickCityHint(raw);           // 例: 「所沢市」
-  const bare = stripCity(raw);                  // 例: 「大六天」
-  const base = normalizeName(bare);             // 空白除去／漢数字→数字／末尾「交差点」外し
+  const cityHint = (raw.split(/[\s　]+/).filter(Boolean).filter(t=>/[市区町村]$/.test(t)).pop()) || "";
+  const bare = cityHint ? raw.replace(new RegExp(`[\\s　]*${cityHint}$`), "") : raw;
+  const base = normalizeName(bare);
   const vlist = variants(bare).map(v => v.toLowerCase());
 
   // 1) キャッシュ（全国）— 完全一致 → 部分一致
   const orExact = `or=(${vlist.map(v => `name_norm.ilike.${encodeURIComponent(v)}`).join(",")})`;
-  const exact = await sbSelect(`intersections?select=name,lat,lng,city&${orExact}`);
+  let exact: any[] = await sbSelect(`intersections?select=name,lat,lng,city&${orExact}`);
   if (exact?.length) {
-    const items = (exact as any[]).map(r => ({ name:r.name, lat:r.lat, lng:r.lng, city:r.city, source:"exact" as const }));
-    // city一致を上に並べ替え（結果は返す）
-    items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
+    let items: Cand[] = exact.map(r => ({ name:r.name, lat:r.lat, lng:r.lng, city:r.city, source:"exact" as const }));
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view)); // ★ 近い順
+    else items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
     return NextResponse.json({ items });
   }
 
-  const partial = await sbSelect(`intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(base)}*`);
+  let partial: any[] = await sbSelect(`intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(base)}*`);
   if (partial?.length) {
     const seen = new Set<string>();
-    const items = (partial as any[])
+    let items: Cand[] = (partial as any[])
       .map(r => ({ name:r.name, lat:r.lat, lng:r.lng, city:r.city, source:"partial" as const }))
       .filter(r=>{ const k = `${r.name}|${r.lat.toFixed(6)}|${r.lng.toFixed(6)}`; if (seen.has(k)) return false; seen.add(k); return true; })
       .slice(0,20);
-    items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
+    else items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
     return NextResponse.json({ items });
   }
 
-  // 2) ライブ検索
-  //   2-1) 中心点の候補を増やす： cityHint → bare → raw の順で取得
-  const center = (await nominatimCenter(cityHint)) || (await nominatimCenter(bare)) || (await nominatimCenter(raw));
-  //   2-2) 近傍 “完全一致” → ダメなら “全国 完全一致” → ダメなら “近傍 部分一致”
-  const liveExactNear = await overpassExact(center, vlist, 6000);
+  // 2) ライブ検索：近傍完全一致 → 全国完全一致 → 近傍部分一致
+  const center = view || (await nominatimCenter(cityHint)) || (await nominatimCenter(bare)) || (await nominatimCenter(raw));
+  const liveExactNear = await overpassExact(center || null, vlist, 6000);
   if (liveExactNear.length) {
-    sbUpsert(liveExactNear.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city:cityHint || null })));
-    return NextResponse.json({ items: liveExactNear.map(r=>({ ...r, source:"live" as const })) });
+    sbUpsert(liveExactNear.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
+    let items = liveExactNear.map(r=>({ ...r, source:"live" as const }));
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
+    return NextResponse.json({ items });
   }
   const liveExactAll = await overpassExact(null, vlist, 0);
   if (liveExactAll.length) {
-    sbUpsert(liveExactAll.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city:cityHint || null })));
-    return NextResponse.json({ items: liveExactAll.map(r=>({ ...r, source:"live" as const })) });
+    sbUpsert(liveExactAll.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
+    let items = liveExactAll.map(r=>({ ...r, source:"live" as const }));
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
+    return NextResponse.json({ items });
   }
   const needle = kanjiNumToArabic(base);
-  const livePartial = await overpassPartial(center, needle, 4000);
+  const livePartial = await overpassPartial(center || null, needle, 4000);
   if (livePartial.length) {
-    sbUpsert(livePartial.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city:cityHint || null })));
-    return NextResponse.json({ items: livePartial.map(r=>({ ...r, source:"live" as const })).slice(0,20) });
+    sbUpsert(livePartial.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
+    let items = livePartial.map(r=>({ ...r, source:"live" as const })).slice(0,20);
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
+    return NextResponse.json({ items });
   }
 
   return NextResponse.json({ items: [] });
