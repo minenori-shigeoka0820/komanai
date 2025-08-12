@@ -3,35 +3,26 @@
 import { useEffect } from "react";
 import "leaflet/dist/leaflet.css";
 
-type SelectInfo = {
-  name: string;
-  lat: number;
-  lng: number;
-  address: string;
-};
-
-type Props = {
-  onSelect?: (info: SelectInfo) => void;
-};
+type SelectInfo = { name: string; lat: number; lng: number; address: string };
+type Props = { onSelect?: (info: SelectInfo) => void };
 
 export default function HomeMap({ onSelect }: Props) {
   useEffect(() => {
     (async () => {
       const L = await import("leaflet");
 
-      // 壊れ画像対策：デフォルトアイコンURLを指定
+      // 壊れアイコン対策
       L.Icon.Default.mergeOptions({
-        iconRetinaUrl:
-          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-        iconUrl:
-          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-        shadowUrl:
-          "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+        iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+        iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+        shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
       });
 
+      const DEFAULT = { lat: 35.681236, lng: 139.767125, zoom: 13 }; // 東京駅
+
       const map = L.map("map", {
-        center: [35.681236, 139.767125],
-        zoom: 13,
+        center: [DEFAULT.lat, DEFAULT.lng],
+        zoom: DEFAULT.zoom,
         scrollWheelZoom: true,
         dragging: true,
       });
@@ -49,91 +40,15 @@ export default function HomeMap({ onSelect }: Props) {
       let marker: any;
       let candidateLayer: any;
 
-      // 交差点スナップ（近い信号/交差点ノードへ寄せる）
-      async function snapToIntersection(lat: number, lng: number) {
-        const radii = [60, 90, 120];
-        for (const r of radii) {
-          const q = `
-            [out:json][timeout:10];
-            (
-              node(around:${r}, ${lat}, ${lng})["highway"~"traffic_signals|stop|crossing"];
-              node(around:${r}, ${lat}, ${lng})["junction"~"yes|intersection|roundabout"];
-            );
-            out tags center 50;
-          `;
-          try {
-            const res = await fetch("https://overpass-api.de/api/interpreter", {
-              method: "POST",
-              headers: { "Content-Type": "text/plain" },
-              body: q,
-            });
-            const data = await res.json();
-            const items =
-              data?.elements?.map((e: any) => {
-                const y = e.lat ?? e.center?.lat;
-                const x = e.lon ?? e.center?.lon;
-                const d = Math.hypot(lat - y, lng - x);
-                const name = e.tags?.["name:ja"] || e.tags?.name || "";
-                return { lat: y, lng: x, d, name };
-              }) || [];
-            if (items.length) {
-              items.sort((a: any, b: any) => a.d - b.d);
-              return items[0]; // 最も近い
-            }
-          } catch {
-            // 次半径で再試行
-          }
-        }
-        return { lat, lng, name: "" };
-      }
-
-      // 交差点名の取得：Overpass（name系）→ Nominatim（住所）
       async function reverseGeocode(lat: number, lng: number) {
-        const overpassQL = `
-          [out:json][timeout:10];
-          (
-            node(around:60, ${lat}, ${lng})["highway"~"traffic_signals|stop|crossing"]["name"];
-            node(around:60, ${lat}, ${lng})["junction"]["name"];
-            way(around:60, ${lat}, ${lng})["junction"]["name"];
-          );
-          out tags center 20;
-        `;
-        try {
-          const oRes = await fetch("https://overpass-api.de/api/interpreter", {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: overpassQL,
-          });
-          const oData = await oRes.json();
-          if (oData?.elements?.length) {
-            const pick = oData.elements
-              .map((e: any) => {
-                const y = e.lat ?? e.center?.lat;
-                const x = e.lon ?? e.center?.lon;
-                const d = Math.hypot(lat - y, lng - x);
-                const tags = e.tags || {};
-                const name = tags["name:ja"] || tags["name"] || "";
-                return { d, name };
-              })
-              .filter((v: any) => v.name)
-              .sort((a: any, b: any) => a.d - b.d)[0];
-            if (pick) return { name: pick.name, address: pick.name };
-          }
-        } catch {}
-
         try {
           const nRes = await fetch(
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=19&accept-language=ja&addressdetails=1&namedetails=1`,
             { headers: { "User-Agent": "komanai.com demo" } as any }
           );
           const n = await nRes.json();
-          const name =
-            n?.namedetails?.["name:ja"] ||
-            n?.namedetails?.name ||
-            n?.name ||
-            "";
-          const address =
-            n?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+          const name = n?.namedetails?.["name:ja"] || n?.namedetails?.name || n?.name || "";
+          const address = n?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
           return { name: name || "名称未取得", address };
         } catch {
           return { name: "", address: `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
@@ -141,107 +56,60 @@ export default function HomeMap({ onSelect }: Props) {
       }
 
       async function placeMarker(lat: number, lng: number, zoom?: number) {
-        // 候補レイヤーは消す（選択確定）
-        if (candidateLayer) {
-          candidateLayer.clearLayers();
-          candidateLayer.remove();
-          candidateLayer = null;
-        }
-
-        // 交差点へスナップ
-        const snapped = await snapToIntersection(lat, lng);
-        const useLat = snapped.lat ?? lat;
-        const useLng = snapped.lng ?? lng;
-
-        if (zoom) map.setView([useLat, useLng], zoom);
-        else map.setView([useLat, useLng], map.getZoom());
-
+        // 候補レイヤー消去
+        if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); candidateLayer = null; }
+        if (zoom) map.setView([lat, lng], zoom); else map.setView([lat, lng]);
         if (marker) map.removeLayer(marker);
-        marker = (L as any).marker([useLat, useLng]).addTo(map);
-
-        try {
-          const { name, address } = await reverseGeocode(useLat, useLng);
-          marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
-          onSelect?.({ name, lat: useLat, lng: useLng, address });
-        } catch {
-          marker
-            .bindPopup(
-              `位置: ${useLat.toFixed(5)}, ${useLng.toFixed(5)}<br/><small>名称取得に失敗</small>`
-            )
-            .openPopup();
-          onSelect?.({
-            name: "",
-            lat: useLat,
-            lng: useLng,
-            address: `${useLat.toFixed(5)}, ${useLng.toFixed(5)}`,
-          });
-        }
+        marker = (L as any).marker([lat, lng]).addTo(map);
+        const { name, address } = await reverseGeocode(lat, lng);
+        marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
+        onSelect?.({ name, lat, lng, address });
       }
 
-      // 地図クリックで選択
+      // クリックでマーカー
       map.on("click", (e: any) => {
         const { lat, lng } = e.latlng;
         placeMarker(lat, lng);
       });
 
-      // SearchBox からの「指定地点へ」イベント
+      // 検索からの移動
       const onFly = (ev: any) => {
         const { lat, lng, zoom = 17 } = ev.detail || {};
-        if (typeof lat === "number" && typeof lng === "number") {
-          placeMarker(lat, lng, zoom);
-        }
+        if (typeof lat === "number" && typeof lng === "number") placeMarker(lat, lng, zoom);
       };
       window.addEventListener("komanai:flyto", onFly);
 
-      // SearchBox からの「候補群を描画」イベント
+      // 候補群描画
       const onCandidates = (ev: any) => {
-        const arr: { lat: number; lng: number }[] = (ev.detail?.items || []).map(
-          (x: any) => ({ lat: x.lat, lng: x.lng })
-        );
-
-        // 既存候補レイヤーをクリア
-        if (candidateLayer) {
-          candidateLayer.clearLayers();
-          candidateLayer.remove();
-        }
+        const arr: { lat: number; lng: number }[] = (ev.detail?.items || []).map((x: any) => ({ lat: x.lat, lng: x.lng }));
+        if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); }
         if (!arr.length) return;
-
-        candidateLayer = (L as any)
-          .layerGroup(
-            arr.map((p: { lat: number; lng: number }) =>
-              (L as any)
-                .circleMarker([p.lat, p.lng], {
-                  radius: 6,
-                  weight: 2,
-                  color: "red",
-                  fillColor: "#f03",
-                  fillOpacity: 0.5,
-                })
-                .bindTooltip("候補")
-            )
+        candidateLayer = (L as any).layerGroup(
+          arr.map((p) =>
+            (L as any).circleMarker([p.lat, p.lng], { radius: 6, weight: 2, color: "red", fillOpacity: 0.5 }).bindTooltip("候補")
           )
-          .addTo(map);
+        ).addTo(map);
       };
       window.addEventListener("komanai:candidates", onCandidates);
+
+      // リセット
+      const onReset = () => {
+        if (marker) { map.removeLayer(marker); marker = null; }
+        if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); candidateLayer = null; }
+        map.setView([DEFAULT.lat, DEFAULT.lng], DEFAULT.zoom);
+      };
+      window.addEventListener("komanai:reset", onReset);
 
       return () => {
         window.removeEventListener("komanai:flyto", onFly);
         window.removeEventListener("komanai:candidates", onCandidates);
+        window.removeEventListener("komanai:reset", onReset);
         map.remove();
       };
     })();
   }, [onSelect]);
 
   return (
-    <div
-      id="map"
-      style={{
-        width: "100%",
-        height: 360,
-        marginTop: 16,
-        borderRadius: 8,
-        overflow: "hidden",
-      }}
-    />
+    <div id="map" style={{ width: "100%", height: 360, marginTop: 16, borderRadius: 8, overflow: "hidden" }} />
   );
 }
