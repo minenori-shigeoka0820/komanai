@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Cand = { name: string; lat: number; lng: number; city?: string; source: "exact" | "partial" | "live" };
 
@@ -15,6 +15,10 @@ export default function SearchBox() {
   // ボタンの押下演出
   const [pressSearch, setPressSearch] = useState(false);
   const [pressReset, setPressReset] = useState(false);
+
+  // 進行中の検索を中断するためのコントローラ
+  const ctrlRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 投稿ドラフト
   const [draftName, setDraftName] = useState("");
@@ -39,6 +43,17 @@ export default function SearchBox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftAddr]);
 
+  function abortOngoing() {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    if (ctrlRef.current) {
+      try { ctrlRef.current.abort(); } catch {}
+      ctrlRef.current = null;
+    }
+  }
+
   async function runSearch() {
     setMsg(null);
     const s = q.trim();
@@ -48,6 +63,9 @@ export default function SearchBox() {
       setStatus("キーワードを入力してください。");
       return;
     }
+
+    // 進行中の検索は中断
+    abortOngoing();
 
     // 現在地（地図中心）をAPIへ
     // @ts-ignore
@@ -63,8 +81,17 @@ export default function SearchBox() {
     setLoading(true);
     setStatus("検索中…");
 
+    // 新しいコントローラを作成
+    const ctrl = new AbortController();
+    ctrlRef.current = ctrl;
+
+    // 10秒でタイムアウト
+    timeoutRef.current = setTimeout(() => {
+      ctrl.abort();
+    }, 10000);
+
     try {
-      const res = await fetch(url.toString(), { cache: "no-store" });
+      const res = await fetch(url.toString(), { cache: "no-store", signal: ctrl.signal });
       const js = await res.json().catch(() => ({ items: [] }));
       const arr: Cand[] = js.items || [];
 
@@ -88,11 +115,18 @@ export default function SearchBox() {
         window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
       }
     } catch (e: any) {
-      setStatus(`検索に失敗しました：${e?.message || "network error"}`);
+      const aborted = e?.name === "AbortError";
+      if (aborted) {
+        setStatus("検索がタイムアウトしました（10秒）。もう一度お試しください。");
+      } else {
+        setStatus(`検索に失敗しました：${e?.message || "network error"}`);
+      }
       setItems([]);
       setOpen(true);
       window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
     } finally {
+      // タイマー&コントローラを片付ける
+      abortOngoing();
       setLoading(false);
       setPressSearch(false);
     }
@@ -106,6 +140,11 @@ export default function SearchBox() {
   }
 
   function resetAll() {
+    // 進行中の検索を中断し、ローディングを必ず解除
+    abortOngoing();
+    setLoading(false);
+    setPressSearch(false);
+
     setQ("");
     setItems([]);
     setOpen(false);
@@ -213,7 +252,7 @@ export default function SearchBox() {
         </button>
       </div>
 
-      {/* ステータス（スクリーンリーダーにも読ませる） */}
+      {/* ステータス */}
       <div aria-live="polite" style={{ minHeight: 20, fontSize: 13, color: "#555" }}>
         {status}
       </div>
@@ -225,7 +264,10 @@ export default function SearchBox() {
             <button
               key={`${c.lat},${c.lng},${idx}`}
               type="button"
-              onClick={() => flyTo(c)}
+              onClick={() => {
+                setPressSearch(false);
+                flyTo(c);
+              }}
               style={{
                 display: "block", width: "100%", textAlign: "left",
                 padding: "10px 12px", border: "none",
@@ -246,7 +288,7 @@ export default function SearchBox() {
         </div>
       )}
 
-      {/* 該当なし → 投稿フォーム（わかりやすい黄色バー付き） */}
+      {/* 該当なし → 投稿フォーム（黄色バー付き） */}
       {open && items.length === 0 && (
         <div style={{ border: "1px solid #ddd", borderRadius: 8, background: "#fff" }}>
           <div style={{ background: "#fff7cc", borderBottom: "1px solid #eee", padding: "8px 12px", borderTopLeftRadius: 8, borderTopRightRadius: 8 }}>
@@ -286,7 +328,15 @@ export default function SearchBox() {
               <button
                 onClick={submitDraft}
                 disabled={saving}
-                style={btnPrimary(false, saving)}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 8,
+                  background: saving ? "#7fbad9" : "#1976d2",
+                  color: "#fff",
+                  border: "1px solid #1976d2",
+                  cursor: "pointer",
+                  transition: "transform .06s ease, box-shadow .06s ease",
+                }}
               >
                 {saving ? "保存中…" : "投稿する"}
               </button>
