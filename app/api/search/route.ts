@@ -6,6 +6,7 @@ type Cand = { name: string; lat: number; lng: number; source: "exact" | "partial
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE!;
 
+// ------------ Supabase ------------
 async function sbSelect(path: string) {
   if (!SUPABASE_URL || !SERVICE_KEY) return [];
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -26,6 +27,7 @@ async function sbUpsert(rows: any[]) {
   }).catch(()=>{});
 }
 
+// ------------ ユーティリティ ------------
 function pickCityHint(input: string) {
   const tokens = input.split(/[\s　]+/).filter(Boolean);
   const cand = tokens.filter(t => /[市区町村]$/.test(t));
@@ -51,12 +53,13 @@ async function nominatimCenter(q: string) {
   return null;
 }
 
+// ------------ Overpass ------------
 const HWY_ROAD_REGEX =
   "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)$";
 const NOT_BUS =
   `["highway"!="bus_stop"]["amenity"!="bus_station"]["public_transport"!="platform"]["public_transport"!="stop_position"]["public_transport"!="stop_area"]`;
 
-async function overpassExact(center: {lat:number,lng:number}|null, vlist: string[], radius = 6000) {
+async function overpassExactNear(center: {lat:number,lng:number}|null, vlist: string[], radius = 6000) {
   const aroundNode = center ? (r:number)=>`node(around:${r},${center.lat},${center.lng})` : (_:number)=>`node`;
   const aroundWay  = center ? (r:number)=>`way(around:${r},${center.lat},${center.lng})`  : (_:number)=>`way`;
   const alt = vlist.map(v => `^${v}$`).join("|");
@@ -82,18 +85,19 @@ async function overpassExact(center: {lat:number,lng:number}|null, vlist: string
       return lat && lng && name ? { name, lat, lng } : null;
     }).filter(Boolean) as {name:string,lat:number,lng:number}[];
 }
-async function overpassPartial(center: {lat:number,lng:number}|null, needle: string, radius = 4000) {
-  if (!center) return [];
+
+// ★ 全国“完全一致”— node/way/relation、name と name:ja 両方を対象（フィルタ緩め）
+async function overpassExactNationwide(vlist: string[]) {
+  const alt = vlist.map(v => `^${v}$`).join("|");
   const q = `
     [out:json][timeout:25];
     (
-      node(around:${radius}, ${center.lat}, ${center.lng})["highway"~"${HWY_ROAD_REGEX}"]["name"~"${needle}",i]${NOT_BUS};
-      node(around:${radius}, ${center.lat}, ${center.lng})["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${needle}",i]${NOT_BUS};
-      node(around:${radius}, ${center.lat}, ${center.lng})["highway"~"traffic_signals|stop|crossing"]["name"~"${needle}",i]${NOT_BUS};
-      node(around:${radius}, ${center.lat}, ${center.lng})["junction"]["name"~"${needle}",i]${NOT_BUS};
-      way(around:${radius}, ${center.lat}, ${center.lng})["highway"~"${HWY_ROAD_REGEX}"]["name"~"${needle}",i]${NOT_BUS};
-      way(around:${radius}, ${center.lat}, ${center.lng})["highway"~"${HWY_ROAD_REGEX}"]["name:ja"~"${needle}",i]${NOT_BUS};
-      way(around:${radius}, ${center.lat}, ${center.lng})["junction"]["name"~"${needle}",i]${NOT_BUS};
+      node["name"~"${alt}",i];
+      way["name"~"${alt}",i];
+      relation["name"~"${alt}",i];
+      node["name:ja"~"${alt}",i];
+      way["name:ja"~"${alt}",i];
+      relation["name:ja"~"${alt}",i];
     );
     out tags center 200;
   `;
@@ -107,6 +111,25 @@ async function overpassPartial(center: {lat:number,lng:number}|null, needle: str
     }).filter(Boolean) as {name:string,lat:number,lng:number}[];
 }
 
+// Nominatimでの補助ヒット（“…交差点”を付けてみる）
+async function nominatimGuess(bare: string) {
+  const qlist = Array.from(new Set([bare, `${bare} 交差点`]));
+  for (const q of qlist) {
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&countrycodes=jp&limit=5&accept-language=ja&addressdetails=1`;
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": "komanai search" } as any, cache: "no-store" as any });
+      const js = await r.json();
+      const arr = (js as any[] ?? []).map(it => {
+        const name = (it.namedetails?.["name:ja"] || it.namedetails?.name || it.name || "").trim();
+        const lat = parseFloat(it.lat), lng = parseFloat(it.lon);
+        return (name && Number.isFinite(lat) && Number.isFinite(lng)) ? { name, lat, lng } : null;
+      }).filter(Boolean) as {name:string,lat:number,lng:number}[];
+      if (arr.length) return arr;
+    } catch {}
+  }
+  return [];
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const raw = (searchParams.get("q") || "").trim();
@@ -117,20 +140,18 @@ export async function GET(req: NextRequest) {
   if (!raw) return NextResponse.json({ items: [] });
 
   const cityHint = (raw.split(/[\s　]+/).filter(Boolean).filter(t=>/[市区町村]$/.test(t)).pop()) || "";
-  const bare = cityHint ? raw.replace(new RegExp(`[\\s　]*${cityHint}$`), "") : raw;
+  const bare = stripCity(raw);
   const base = normalizeName(bare);
   const vlist = variants(bare).map(v => v.toLowerCase());
 
-  // 1) キャッシュ（全国）— 完全一致 → 部分一致
+  // 1) キャッシュ（全国）— 完全一致 → 部分一致（距離で並べ替え）
   const orExact = `or=(${vlist.map(v => `name_norm.ilike.${encodeURIComponent(v)}`).join(",")})`;
   let exact: any[] = await sbSelect(`intersections?select=name,lat,lng,city&${orExact}`);
   if (exact?.length) {
     let items: Cand[] = exact.map(r => ({ name:r.name, lat:r.lat, lng:r.lng, city:r.city, source:"exact" as const }));
-    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view)); // ★ 近い順
-    else items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
     return NextResponse.json({ items });
   }
-
   let partial: any[] = await sbSelect(`intersections?select=name,lat,lng,city&name_norm=ilike.*${encodeURIComponent(base)}*`);
   if (partial?.length) {
     const seen = new Set<string>();
@@ -139,31 +160,42 @@ export async function GET(req: NextRequest) {
       .filter(r=>{ const k = `${r.name}|${r.lat.toFixed(6)}|${r.lng.toFixed(6)}`; if (seen.has(k)) return false; seen.add(k); return true; })
       .slice(0,20);
     if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
-    else items.sort((a,b)=>((a.city===cityHint?0:1)-(b.city===cityHint?0:1)));
     return NextResponse.json({ items });
   }
 
-  // 2) ライブ検索：近傍完全一致 → 全国完全一致 → 近傍部分一致
+  // 2) ライブ：近傍完全一致 → ★全国完全一致（node/way/relation, name/name:ja） → 近傍部分一致 → Nominatim補助
   const center = view || (await nominatimCenter(cityHint)) || (await nominatimCenter(bare)) || (await nominatimCenter(raw));
-  const liveExactNear = await overpassExact(center || null, vlist, 6000);
+  const liveExactNear = await overpassExactNear(center || null, vlist, 6000);
   if (liveExactNear.length) {
     sbUpsert(liveExactNear.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
     let items = liveExactNear.map(r=>({ ...r, source:"live" as const }));
     if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
     return NextResponse.json({ items });
   }
-  const liveExactAll = await overpassExact(null, vlist, 0);
+
+  // ★ 全国完全一致（強化ポイント）
+  const liveExactAll = await overpassExactNationwide(vlist);
   if (liveExactAll.length) {
     sbUpsert(liveExactAll.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
     let items = liveExactAll.map(r=>({ ...r, source:"live" as const }));
     if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
     return NextResponse.json({ items });
   }
+
   const needle = kanjiNumToArabic(base);
-  const livePartial = await overpassPartial(center || null, needle, 4000);
+  const livePartial = await overpassExactNear(center || null, [needle], 4000); // 部分一致よりもまず exact(needle) 近傍を再試行
   if (livePartial.length) {
     sbUpsert(livePartial.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
     let items = livePartial.map(r=>({ ...r, source:"live" as const })).slice(0,20);
+    if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
+    return NextResponse.json({ items });
+  }
+
+  // Nominatim 補助（“…交差点”含む）
+  const guess = await nominatimGuess(bare);
+  if (guess.length) {
+    sbUpsert(guess.map(r=>({ name:r.name, name_norm:normalizeName(r.name), lat:r.lat, lng:r.lng, city: cityHint || null })));
+    let items = guess.map(r=>({ ...r, source:"live" as const })).slice(0,20);
     if (view) items.sort((a,b)=>dist(a,view)-dist(b,view));
     return NextResponse.json({ items });
   }
