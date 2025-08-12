@@ -6,10 +6,9 @@ import "leaflet/dist/leaflet.css";
 export default function HomeMap() {
   useEffect(() => {
     (async () => {
-      // ✅ SSR回避：Leafletはクライアントで動的import
       const L = await import("leaflet");
 
-      // デフォルトアイコン（壊れ画像対策）
+      // 壊れアイコン対策
       L.Icon.Default.mergeOptions({
         iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
         iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
@@ -23,7 +22,6 @@ export default function HomeMap() {
 
       let marker: any = null;
 
-      // SearchBox からの移動（座標はそのまま使う）
       const onFly = (e: any) => {
         const { lat, lng, zoom = 17, name = "地点" } = e.detail || {};
         if (typeof lat !== "number" || typeof lng !== "number") return;
@@ -33,7 +31,6 @@ export default function HomeMap() {
       };
       window.addEventListener("komanai:flyto", onFly);
 
-      // クリーンアップ
       return () => {
         window.removeEventListener("komanai:flyto", onFly);
         map.remove();
