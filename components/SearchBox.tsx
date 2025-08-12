@@ -24,7 +24,6 @@ export default function SearchBox() {
     const res = await fetch(`/api/search?q=${encodeURIComponent(s)}`, { cache: "no-store" });
     const js = await res.json();
     const arr: Cand[] = js.items || [];
-    // 表示順：exact → live → partial（同点はそのまま）
     arr.sort((a,b)=>{
       const rank = { exact: 0, live: 1, partial: 2 } as const;
       return rank[a.source] - rank[b.source];
@@ -32,7 +31,6 @@ export default function SearchBox() {
     setItems(arr);
     setOpen(true);
 
-    // 近傍候補だけの場合は地図に候補群を描画（live/partial まとめて）
     if (arr.length > 0 && arr.every(i => i.source !== "exact")) {
       window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: arr } }));
     } else {
@@ -43,7 +41,10 @@ export default function SearchBox() {
   function select(c: Cand) {
     setQ(c.name);
     setOpen(false);
-    window.dispatchEvent(new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17 } }));
+    // ★ 名前も一緒に渡す
+    window.dispatchEvent(new CustomEvent("komanai:flyto", {
+      detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name }
+    }));
   }
 
   function resetAll() {
