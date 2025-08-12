@@ -23,10 +23,11 @@ export default function SearchBox() {
     setStatus("idle");
   }
 
-  function flyTo(c: Cand) {
-    setQ(c.name);
-    window.dispatchEvent(new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name } }));
-  }
+  function flyTo(c: { name: string; lat: number; lng: number }) {
+  window.dispatchEvent(
+    new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name } })
+  );
+}
 
   return (
     <div className="search-box">
