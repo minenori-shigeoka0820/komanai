@@ -11,10 +11,13 @@ export default function SearchBox() {
   async function handleSearch() {
     if (!q.trim()) return;
     setStatus("searching");
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { cache: "no-store" });
-    const js = await res.json();
-    setItems(js.items || []);
-    setStatus("idle");
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { cache: "no-store" });
+      const js = await res.json();
+      setItems(js.items || []);
+    } finally {
+      setStatus("idle");
+    }
   }
 
   function handleReset() {
@@ -23,11 +26,13 @@ export default function SearchBox() {
     setStatus("idle");
   }
 
-  function flyTo(c: { name: string; lat: number; lng: number }) {
-  window.dispatchEvent(
-    new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name } })
-  );
-}
+  // ✅ APIの座標を“そのまま”使って地図へ
+  function flyTo(c: Cand) {
+    setQ(c.name);
+    window.dispatchEvent(
+      new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17, name: c.name } })
+    );
+  }
 
   return (
     <div className="search-box">
