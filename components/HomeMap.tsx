@@ -47,35 +47,41 @@ export default function HomeMap({ onSelect }: Props) {
             { headers: { "User-Agent": "komanai.com demo" } as any }
           );
           const n = await nRes.json();
-          const name = n?.namedetails?.["name:ja"] || n?.namedetails?.name || n?.name || "";
           const address = n?.display_name || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-          return { name: name || "名称未取得", address };
+          // ここでは“住所のみ”を返す（名称は検索側を優先）
+          return address;
         } catch {
-          return { name: "", address: `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+          return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
         }
       }
 
-      async function placeMarker(lat: number, lng: number, zoom?: number) {
-        // 候補レイヤー消去
+      async function placeMarker(lat: number, lng: number, zoom?: number, preferredName?: string) {
         if (candidateLayer) { candidateLayer.clearLayers(); candidateLayer.remove(); candidateLayer = null; }
-        if (zoom) map.setView([lat, lng], zoom); else map.setView([lat, lng]);
+        if (typeof zoom === "number") map.setView([lat, lng], zoom); else map.setView([lat, lng]);
+
         if (marker) map.removeLayer(marker);
         marker = (L as any).marker([lat, lng]).addTo(map);
-        const { name, address } = await reverseGeocode(lat, lng);
-        marker.bindPopup(`${name}<br/><small>${address}</small>`).openPopup();
-        onSelect?.({ name, lat, lng, address });
+
+        const address = await reverseGeocode(lat, lng);
+        const title = preferredName && preferredName.trim() ? preferredName : ""; // ← 検索で選んだ名称を最優先
+        const header = title || "地点";
+        marker.bindPopup(`${header}<br/><small>${address}</small>`).openPopup();
+
+        onSelect?.({ name: title || "", lat, lng, address });
       }
 
-      // クリックでマーカー
+      // クリックでマーカー（この場合は名称を持たないので住所のみ表示）
       map.on("click", (e: any) => {
         const { lat, lng } = e.latlng;
         placeMarker(lat, lng);
       });
 
-      // 検索からの移動
+      // 検索からの移動（name を渡せるように）
       const onFly = (ev: any) => {
-        const { lat, lng, zoom = 17 } = ev.detail || {};
-        if (typeof lat === "number" && typeof lng === "number") placeMarker(lat, lng, zoom);
+        const { lat, lng, zoom = 17, name } = ev.detail || {};
+        if (typeof lat === "number" && typeof lng === "number") {
+          placeMarker(lat, lng, zoom, name);
+        }
       };
       window.addEventListener("komanai:flyto", onFly);
 
