@@ -2,15 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Cand = { name: string; lat: number; lng: number; source: "exact" | "nearby"; address?: string };
-
-function debounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
-  let t: any;
-  return (...args: Parameters<T>) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-}
+type Cand = { name: string; lat: number; lng: number; source: "exact" | "partial" | "live"; city?: string };
 
 export default function SearchBox() {
   const [q, setQ] = useState("");
@@ -26,92 +18,92 @@ export default function SearchBox() {
     return () => document.removeEventListener("click", onDoc);
   }, []);
 
-  const search = async (query: string) => {
-    const s = query.trim();
-    if (!s) {
-      setItems([]);
-      return;
-    }
+  async function runSearch() {
+    const s = q.trim();
+    if (!s) { setItems([]); setOpen(false); return; }
     const res = await fetch(`/api/search?q=${encodeURIComponent(s)}`, { cache: "no-store" });
     const js = await res.json();
     const arr: Cand[] = js.items || [];
+    // 表示順：exact → live → partial（同点はそのまま）
+    arr.sort((a,b)=>{
+      const rank = { exact: 0, live: 1, partial: 2 } as const;
+      return rank[a.source] - rank[b.source];
+    });
     setItems(arr);
     setOpen(true);
 
-    // 近傍候補のみの場合は地図にも候補群を描画させる
-    if (arr.length > 0 && arr.every((i) => i.source === "nearby")) {
+    // 近傍候補だけの場合は地図に候補群を描画（live/partial まとめて）
+    if (arr.length > 0 && arr.every(i => i.source !== "exact")) {
       window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: arr } }));
     } else {
-      // 完全一致や単一選択時は候補レイヤーを消す用の空通知でもOK
       window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
     }
-  };
+  }
 
-  const debounced = useRef(debounce(search, 250)).current;
-
-  const select = (c: Cand) => {
+  function select(c: Cand) {
     setQ(c.name);
     setOpen(false);
     window.dispatchEvent(new CustomEvent("komanai:flyto", { detail: { lat: c.lat, lng: c.lng, zoom: 17 } }));
-  };
+  }
 
-  const hasExact = items.some((i) => i.source === "exact");
+  function resetAll() {
+    setQ("");
+    setItems([]);
+    setOpen(false);
+    window.dispatchEvent(new CustomEvent("komanai:reset"));
+    window.dispatchEvent(new CustomEvent("komanai:candidates", { detail: { items: [] } }));
+  }
 
   return (
-    <div ref={boxRef} style={{ position: "relative", maxWidth: 620, zIndex: 10001 }}>
-      <input
-        value={q}
-        onChange={(e) => {
-          const v = e.target.value;
-          setQ(v);
-          debounced(v);
-        }}
-        onFocus={() => q && items.length && setOpen(true)}
-        placeholder="例）川岸三丁目 戸田市（完全一致優先／一致なしは候補表示）"
-        style={{ width: "100%", padding: "10px 12px", border: "1px solid #ccc", borderRadius: 8, background: "#fff" }}
-      />
+    <div ref={boxRef} style={{ position: "relative", maxWidth: 680, zIndex: 10001 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
+          placeholder="例）大六天 所沢市 / 藤沢 入間市（Enter か 検索ボタン）"
+          style={{ flex: 1, padding: "10px 12px", border: "1px solid #ccc", borderRadius: 8, background: "#fff" }}
+        />
+        <button onClick={runSearch} style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #0a7", background: "#0a7", color: "#fff", cursor: "pointer" }}>
+          検索
+        </button>
+        <button onClick={resetAll} style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #999", background: "#fff", color: "#333", cursor: "pointer" }}>
+          リセット
+        </button>
+      </div>
+
       {open && items.length > 0 && (
         <div
           style={{
-            position: "absolute",
-            zIndex: 10000,           // ← 地図より前面に
-            top: "110%",
-            left: 0,
-            right: 0,
-            background: "#fff",
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            boxShadow: "0 8px 22px rgba(0,0,0,0.12)",
-            overflow: "hidden",
+            position: "absolute", zIndex: 10000, top: "110%", left: 0, right: 0,
+            background: "#fff", border: "1px solid #ddd", borderRadius: 8,
+            boxShadow: "0 8px 22px rgba(0,0,0,0.12)", overflow: "hidden"
           }}
         >
-          {hasExact && (
-            <div style={{ padding: "6px 10px", fontSize: 12, color: "#0a7", background: "#f6fffa" }}>完全一致</div>
-          )}
           {items.map((c, idx) => (
             <button
               key={`${c.lat},${c.lng},${idx}`}
               type="button"
               onClick={() => select(c)}
               style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: "10px 12px",
-                border: "none",
-                background: c.source === "exact" ? "#f8fffb" : "#fff",
+                display: "block", width: "100%", textAlign: "left",
+                padding: "10px 12px", border: "none",
+                background:
+                  c.source === "exact" ? "#f8fffb" :
+                  c.source === "live"  ? "#f7fbff" : "#fff",
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontWeight: 600 }}>{c.name || "交差点候補"}</div>
-              {c.source === "nearby" && <div style={{ fontSize: 12, color: "#666" }}>（近辺の候補）</div>}
+              <div style={{ fontWeight: 600 }}>
+                {c.name}
+                <span style={{ fontSize: 12, color: "#888", marginLeft: 8 }}>
+                  {c.source === "exact" ? "（キャッシュ完全一致）" :
+                   c.source === "live"  ? "（ライブ一致）" : "（部分一致）"}
+                  {c.city ? ` / ${c.city}` : ""}
+                </span>
+              </div>
             </button>
           ))}
-          {!hasExact && (
-            <div style={{ padding: "6px 10px", fontSize: 12, color: "#888" }}>
-              完全一致が見つからなかったため、近辺の交差点候補を表示しています
-            </div>
-          )}
         </div>
       )}
     </div>
